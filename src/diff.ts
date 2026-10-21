@@ -28,7 +28,7 @@ export function diffLines(base: string[], cur: string[]): Hunk[] {
   if (n === 0 && m === 0) return [];
   // 差異區塊過大時直接視為一整段，避免 O(n*m) 記憶體爆掉
   if (n === 0 || m === 0 || n * m > 4_000_000) {
-    return [{ bStart: pre, removed: A, cStart: pre, added: B }];
+    return slideUp([{ bStart: pre, removed: A, cStart: pre, added: B }], base, cur);
   }
 
   const dp: Uint32Array[] = [];
@@ -58,5 +58,26 @@ export function diffLines(base: string[], cur: string[]): Hunk[] {
     }
   }
   if (cur_) hunks.push(cur_);
+  return slideUp(hunks, base, cur);
+}
+
+// 純新增 / 純刪除的區塊若可上下平移（例如 `{ ... },` 兩端都是 `{`），
+// 盡量往上對齊，與 VS Code diff 檢視的切法一致，接受 / 拒絕按鈕才會落在紅綠區塊正上方
+function slideUp(hunks: Hunk[], base: string[], cur: string[]): Hunk[] {
+  let prevBEnd = 0;
+  let prevCEnd = 0;
+  for (const h of hunks) {
+    const pureDel = h.added.length === 0 && h.removed.length > 0;
+    const pureAdd = h.removed.length === 0 && h.added.length > 0;
+    const lines = pureDel ? h.removed : pureAdd ? h.added : undefined;
+    while (lines && h.bStart > prevBEnd && h.cStart > prevCEnd
+      && base[h.bStart - 1] === lines[lines.length - 1]) {
+      lines.unshift(lines.pop()!);
+      h.bStart--;
+      h.cStart--;
+    }
+    prevBEnd = h.bStart + h.removed.length;
+    prevCEnd = h.cStart + h.added.length;
+  }
   return hunks;
 }

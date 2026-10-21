@@ -8,3 +8,6 @@ node_modules/**
 安裝.cmd
 .gitignore
 *.vsix
+test/**
+test-output/**
+.gitattributes

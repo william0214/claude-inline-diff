@@ -8,18 +8,43 @@
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": ["Other"],
-  "activationEvents": ["onStartupFinished"],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      { "command": "claudeInlineDiff.installHook", "title": "Claude Inline Diff: 安裝 Claude Code hook 到此工作區" },
-      { "command": "claudeInlineDiff.acceptFile", "title": "Claude Inline Diff: 接受此檔案全部修改" },
-      { "command": "claudeInlineDiff.rejectFile", "title": "Claude Inline Diff: 拒絕此檔案全部修改" },
-      { "command": "claudeInlineDiff.nextHunk", "title": "Claude Inline Diff: 下一處修改" },
-      { "command": "claudeInlineDiff.prevHunk", "title": "Claude Inline Diff: 上一處修改" },
-      { "command": "claudeInlineDiff.listFiles", "title": "Claude Inline Diff: 列出所有待審檔案" },
-      { "command": "claudeInlineDiff.openReview", "title": "Claude Inline Diff: 以行內 diff 檢視此檔案" }
+      {
+        "command": "claudeInlineDiff.installHook",
+        "title": "Claude Inline Diff: 安裝 Claude Code hook 到此工作區"
+      },
+      {
+        "command": "claudeInlineDiff.acceptFile",
+        "title": "Claude Inline Diff: 接受此檔案全部修改"
+      },
+      {
+        "command": "claudeInlineDiff.rejectFile",
+        "title": "Claude Inline Diff: 拒絕此檔案全部修改"
+      },
+      {
+        "command": "claudeInlineDiff.nextHunk",
+        "title": "Claude Inline Diff: 下一處修改"
+      },
+      {
+        "command": "claudeInlineDiff.prevHunk",
+        "title": "Claude Inline Diff: 上一處修改"
+      },
+      {
+        "command": "claudeInlineDiff.listFiles",
+        "title": "Claude Inline Diff: 列出所有待審檔案"
+      },
+      {
+        "command": "claudeInlineDiff.openReview",
+        "title": "Claude Inline Diff: 以行內 diff 檢視此檔案"
+      }
     ],
     "configuration": {
       "title": "Claude Inline Diff",
@@ -32,20 +57,40 @@
       }
     },
     "keybindings": [
-      { "command": "claudeInlineDiff.acceptFile", "key": "ctrl+alt+y", "mac": "cmd+alt+y", "when": "editorTextFocus" },
-      { "command": "claudeInlineDiff.rejectFile", "key": "ctrl+alt+n", "mac": "cmd+alt+n", "when": "editorTextFocus" },
-      { "command": "claudeInlineDiff.nextHunk", "key": "alt+f5", "when": "editorTextFocus" },
-      { "command": "claudeInlineDiff.prevHunk", "key": "shift+alt+f5", "when": "editorTextFocus" }
+      {
+        "command": "claudeInlineDiff.acceptFile",
+        "key": "ctrl+alt+y",
+        "mac": "cmd+alt+y",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "claudeInlineDiff.rejectFile",
+        "key": "ctrl+alt+n",
+        "mac": "cmd+alt+n",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "claudeInlineDiff.nextHunk",
+        "key": "alt+f5",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "claudeInlineDiff.prevHunk",
+        "key": "shift+alt+f5",
+        "when": "editorTextFocus"
+      }
     ]
   },
   "scripts": {
     "compile": "tsc -p .",
     "watch": "tsc -watch -p .",
-    "package": "vsce package --no-dependencies --allow-missing-repository --skip-license"
+    "package": "vsce package --no-dependencies --allow-missing-repository --skip-license",
+    "test": "npm run compile && node test/runTest.js"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.90.0",
+    "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^3.2.0",
     "typescript": "^5.4.0"
   }

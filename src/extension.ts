@@ -21,9 +21,24 @@ const baselineDocEmitter = new vscode.EventEmitter<vscode.Uri>();
 // 已自動開啟過檢視的檔案，避免重複開分頁
 const reviewOpened = new Set<string>();
 
+const realPathCache = new Map<string, string>();
+
+// 轉成真實完整路徑再比對（Windows 8.3 短檔名、symlink），與 hook 記錄的路徑一致
 function key(p: string): string {
-  const n = path.normalize(p);
-  return process.platform === 'win32' ? n.toLowerCase() : n;
+  let real = realPathCache.get(p);
+  if (real === undefined) {
+    try {
+      real = fs.realpathSync.native(p);
+    } catch {
+      try {
+        real = path.join(fs.realpathSync.native(path.dirname(p)), path.basename(p));
+      } catch {
+        real = path.normalize(p);
+      }
+    }
+    realPathCache.set(p, real);
+  }
+  return process.platform === 'win32' ? real.toLowerCase() : real;
 }
 
 function stripBom(s: string): string {
