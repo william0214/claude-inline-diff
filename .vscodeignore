@@ -3,3 +3,8 @@ src/**
 tsconfig.json
 **/*.map
 node_modules/**
+
+安裝說明.md
+安裝.cmd
+.gitignore
+*.vsix

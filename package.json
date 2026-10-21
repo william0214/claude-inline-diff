@@ -2,7 +2,7 @@
   "name": "claude-inline-diff",
   "displayName": "Claude Inline Diff",
   "description": "在編輯器內以紅綠行內標示顯示 Claude Code 的修改，並可逐段接受 / 拒絕（類似 GitHub Copilot）",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -19,8 +19,18 @@
       { "command": "claudeInlineDiff.nextHunk", "title": "Claude Inline Diff: 下一處修改" },
       { "command": "claudeInlineDiff.prevHunk", "title": "Claude Inline Diff: 上一處修改" },
       { "command": "claudeInlineDiff.listFiles", "title": "Claude Inline Diff: 列出所有待審檔案" },
-      { "command": "claudeInlineDiff.openSideBySide", "title": "Claude Inline Diff: 以左右對照開啟" }
+      { "command": "claudeInlineDiff.openReview", "title": "Claude Inline Diff: 以行內 diff 檢視此檔案" }
     ],
+    "configuration": {
+      "title": "Claude Inline Diff",
+      "properties": {
+        "claudeInlineDiff.autoOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Claude 修改檔案後，自動以行內 diff 開啟該檔案（刪除的行顯示為紅色區塊）"
+        }
+      }
+    },
     "keybindings": [
       { "command": "claudeInlineDiff.acceptFile", "key": "ctrl+alt+y", "mac": "cmd+alt+y", "when": "editorTextFocus" },
       { "command": "claudeInlineDiff.rejectFile", "key": "ctrl+alt+n", "mac": "cmd+alt+n", "when": "editorTextFocus" },

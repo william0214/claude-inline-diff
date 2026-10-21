@@ -24,7 +24,7 @@ let raw = '';
 process.stdin.on('data', d => (raw += d));
 process.stdin.on('end', () => {
   try {
-    const input = JSON.parse(raw);
+    const input = JSON.parse(raw.replace(/^﻿/, ''));
     const filePath = input.tool_input && input.tool_input.file_path;
     if (!filePath) return;
 
@@ -45,7 +45,8 @@ process.stdin.on('end', () => {
 
     const existed = fs.existsSync(abs);
     if (existed && fs.statSync(abs).size > MAX_BYTES) return;
-    const content = existed ? fs.readFileSync(abs, 'utf8') : '';
+    // 去掉 UTF-8 BOM：VS Code 顯示文件時不含 BOM，留著會讓第一行被誤判為修改
+    const content = existed ? fs.readFileSync(abs, 'utf8').replace(/^﻿/, '') : '';
     // 先寫暫存檔再改名，避免擴充套件讀到寫到一半的 JSON
     fs.writeFileSync(out + '.tmp', JSON.stringify({ path: abs, existed, content }));
     fs.renameSync(out + '.tmp', out);

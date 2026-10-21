@@ -17,14 +17,29 @@ const BASELINE_SCHEME = 'claude-inline-diff-base';
 
 const baselines = new Map<string, Baseline>();
 const codeLensEmitter = new vscode.EventEmitter<void>();
+const baselineDocEmitter = new vscode.EventEmitter<vscode.Uri>();
+// 已自動開啟過檢視的檔案，避免重複開分頁
+const reviewOpened = new Set<string>();
 
 function key(p: string): string {
   const n = path.normalize(p);
   return process.platform === 'win32' ? n.toLowerCase() : n;
 }
 
+function stripBom(s: string): string {
+  return s.replace(/^﻿/, '');
+}
+
+function sameText(a: string, b: string): boolean {
+  return splitLines(stripBom(a)).join('\n') === splitLines(stripBom(b)).join('\n');
+}
+
 function eolOf(doc: vscode.TextDocument): string {
   return doc.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
+}
+
+function baseUri(filePath: string): vscode.Uri {
+  return vscode.Uri.from({ scheme: BASELINE_SCHEME, path: vscode.Uri.file(filePath).path, query: filePath });
 }
 
 function baselineFor(doc: vscode.TextDocument): Baseline | undefined {
@@ -42,30 +57,38 @@ function loadSnapshot(file: string) {
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     if (typeof data.path !== 'string') return;
-    // 清掉同一個 snapshot 舊的對應（理論上不會變，但保險）
     for (const [k, b] of baselines) if (b.snapshotFile === file) baselines.delete(k);
     baselines.set(key(data.path), {
       path: data.path,
       existed: data.existed !== false,
-      content: String(data.content ?? ''),
+      content: stripBom(String(data.content ?? '')),
       snapshotFile: file,
     });
+    baselineDocEmitter.fire(baseUri(data.path));
   } catch {
     // hook 可能還在寫入中，等下一次 change 事件
   }
 }
 
 function dropSnapshot(file: string) {
-  for (const [k, b] of baselines) if (b.snapshotFile === file) baselines.delete(k);
+  for (const [k, b] of baselines) {
+    if (b.snapshotFile !== file) continue;
+    baselines.delete(k);
+    reviewOpened.delete(k);
+    closeReviewTabs(b.path);
+  }
 }
 
 function saveBaseline(b: Baseline) {
   fs.writeFileSync(b.snapshotFile, JSON.stringify({ path: b.path, existed: b.existed, content: b.content }));
+  baselineDocEmitter.fire(baseUri(b.path));
 }
 
 function clearBaseline(b: Baseline) {
   baselines.delete(key(b.path));
+  reviewOpened.delete(key(b.path));
   try { fs.unlinkSync(b.snapshotFile); } catch { /* 已不存在 */ }
+  closeReviewTabs(b.path);
 }
 
 function scanFolder(folder: vscode.WorkspaceFolder) {
@@ -74,22 +97,76 @@ function scanFolder(folder: vscode.WorkspaceFolder) {
   for (const f of fs.readdirSync(dir)) if (f.endsWith('.json')) loadSnapshot(path.join(dir, f));
 }
 
-// ---------- 裝飾（紅綠標示） ----------
+// ---------- 行內 diff 檢視（刪除的行以真正的紅色區塊顯示） ----------
+
+function isReviewTab(tab: vscode.Tab, filePath?: string): boolean {
+  const input = tab.input;
+  return input instanceof vscode.TabInputTextDiff
+    && input.original.scheme === BASELINE_SCHEME
+    && (filePath === undefined || key(input.modified.fsPath) === key(filePath));
+}
+
+function closeReviewTabs(filePath: string) {
+  const tabs = vscode.window.tabGroups.all.flatMap(g => g.tabs).filter(t => isReviewTab(t, filePath));
+  if (tabs.length > 0) void vscode.window.tabGroups.close(tabs);
+}
+
+// 編輯器是否正位於本擴充套件開的 diff 檢視中（diff 自己會畫紅綠，不需再加裝飾）
+function inReviewDiff(editor: vscode.TextEditor): boolean {
+  const group = vscode.window.tabGroups.all.find(g => g.viewColumn === editor.viewColumn);
+  return !!group?.activeTab && isReviewTab(group.activeTab, editor.document.uri.fsPath);
+}
+
+let extContext: vscode.ExtensionContext;
+
+// diff 檢視預設是左右對照，且不顯示 CodeLens；第一次使用時詢問是否切成行內模式
+async function ensureInlineSettings() {
+  const cfg = vscode.workspace.getConfiguration('diffEditor');
+  if (cfg.get('renderSideBySide') === false && cfg.get('codeLens') === true) return;
+  if (extContext.globalState.get('inlineSettingsAsked')) return;
+  await extContext.globalState.update('inlineSettingsAsked', true);
+  const pick = await vscode.window.showInformationMessage(
+    'Claude Inline Diff：要把 VS Code 的 diff 檢視改為「行內模式」並顯示接受 / 拒絕按鈕嗎？（會套用到所有 diff 檢視）',
+    '套用', '保持原樣');
+  if (pick !== '套用') return;
+  await cfg.update('renderSideBySide', false, vscode.ConfigurationTarget.Global);
+  await cfg.update('codeLens', true, vscode.ConfigurationTarget.Global);
+}
+
+async function openReview(filePath: string, preserveFocus = false) {
+  void ensureInlineSettings();
+  const file = vscode.Uri.file(filePath);
+  await vscode.commands.executeCommand(
+    'vscode.diff', baseUri(filePath), file,
+    `${path.basename(filePath)}（Claude 的修改）`,
+    { preview: false, preserveFocus },
+  );
+}
+
+function currentText(b: Baseline): string | undefined {
+  const doc = vscode.workspace.textDocuments.find(d => d.uri.scheme === 'file' && key(d.uri.fsPath) === key(b.path));
+  if (doc) return doc.getText();
+  try { return fs.readFileSync(b.path, 'utf8'); } catch { return undefined; }
+}
+
+// Claude 一改完檔案就自動開啟行內 diff
+function autoOpenReviews() {
+  if (!vscode.workspace.getConfiguration('claudeInlineDiff').get('autoOpen', true)) return;
+  for (const [k, b] of baselines) {
+    if (reviewOpened.has(k)) continue;
+    const text = currentText(b);
+    if (text === undefined || sameText(b.content, text)) continue;
+    reviewOpened.add(k);
+    void openReview(b.path, true);
+  }
+}
+
+// ---------- 一般編輯器中的提示（未開 diff 時） ----------
 
 const addedDeco = vscode.window.createTextEditorDecorationType({
   isWholeLine: true,
   backgroundColor: new vscode.ThemeColor('diffEditor.insertedLineBackground'),
   overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.addedForeground'),
-  overviewRulerLane: vscode.OverviewRulerLane.Left,
-  borderStyle: 'solid',
-  borderWidth: '0 0 0 3px',
-  borderColor: new vscode.ThemeColor('editorGutter.addedBackground'),
-});
-
-// 被刪除的行無法真的插入編輯器，以紅色刪除線 ghost text 附在相鄰行顯示
-const removedDeco = vscode.window.createTextEditorDecorationType({
-  isWholeLine: true,
-  overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.deletedForeground'),
   overviewRulerLane: vscode.OverviewRulerLane.Left,
 });
 
@@ -98,24 +175,9 @@ const removedMarkerDeco = vscode.window.createTextEditorDecorationType({
   borderStyle: 'solid',
   borderWidth: '2px 0 0 0',
   borderColor: new vscode.ThemeColor('editorGutter.deletedBackground'),
+  overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.deletedForeground'),
+  overviewRulerLane: vscode.OverviewRulerLane.Left,
 });
-
-function truncate(s: string, n = 100): string {
-  const t = s.trim();
-  return t.length > n ? t.slice(0, n) + '…' : t;
-}
-
-function ghost(text: string): vscode.DecorationInstanceRenderOptions {
-  return {
-    after: {
-      contentText: text,
-      color: new vscode.ThemeColor('editorError.foreground'),
-      backgroundColor: new vscode.ThemeColor('diffEditor.removedLineBackground'),
-      textDecoration: 'line-through; opacity: 0.85',
-      margin: '0 0 0 2em',
-    },
-  };
-}
 
 function removedHover(h: Hunk): vscode.MarkdownString {
   const md = new vscode.MarkdownString(`**Claude 刪除了 ${h.removed.length} 行：**`);
@@ -125,44 +187,27 @@ function removedHover(h: Hunk): vscode.MarkdownString {
 
 function refreshEditor(editor: vscode.TextEditor) {
   const doc = editor.document;
-  const hunks = hunksFor(doc);
+  const hunks = inReviewDiff(editor) ? [] : hunksFor(doc);
   const added: vscode.DecorationOptions[] = [];
-  const removed: vscode.DecorationOptions[] = [];
   const markers: vscode.DecorationOptions[] = [];
   const last = Math.max(0, doc.lineCount - 1);
 
   for (const h of hunks) {
-    for (let k = 0; k < h.added.length; k++) {
-      const line = h.cStart + k;
-      if (line > last) break;
-      const range = doc.lineAt(line).range;
-      // 一對一替換的行：在新行後面附上原本那一行
-      if (k < h.removed.length) {
-        const extra = k === h.added.length - 1 && h.removed.length > h.added.length
-          ? `  (+${h.removed.length - h.added.length} 行已刪除)` : '';
-        removed.push({ range, renderOptions: ghost(`⟵ ${truncate(h.removed[k])}${extra}`), hoverMessage: removedHover(h) });
-      }
-      added.push({ range });
+    for (let k = 0; k < h.added.length && h.cStart + k <= last; k++) {
+      added.push({ range: doc.lineAt(h.cStart + k).range });
     }
-    // 純刪除：在刪除位置畫紅線並顯示被刪的內容
-    if (h.added.length === 0 && h.removed.length > 0) {
-      const line = Math.min(h.cStart, last);
-      const range = doc.lineAt(line).range;
-      const label = h.removed.length === 1
-        ? `⊖ ${truncate(h.removed[0])}`
-        : `⊖ 刪除 ${h.removed.length} 行：${truncate(h.removed[0], 60)}`;
-      markers.push({ range, hoverMessage: removedHover(h) });
-      removed.push({ range, renderOptions: ghost(label), hoverMessage: removedHover(h) });
+    if (h.removed.length > 0) {
+      markers.push({ range: doc.lineAt(Math.min(h.cStart, last)).range, hoverMessage: removedHover(h) });
     }
   }
   editor.setDecorations(addedDeco, added);
-  editor.setDecorations(removedDeco, removed);
   editor.setDecorations(removedMarkerDeco, markers);
 }
 
 let statusItem: vscode.StatusBarItem;
 
 function refreshAll() {
+  autoOpenReviews();
   for (const e of vscode.window.visibleTextEditors) refreshEditor(e);
   codeLensEmitter.fire();
   const n = baselines.size;
@@ -192,12 +237,13 @@ class HunkCodeLens implements vscode.CodeLensProvider {
     const last = Math.max(0, doc.lineCount - 1);
     const top = new vscode.Range(0, 0, 0, 0);
     const lenses = [
-      new vscode.CodeLens(top, { title: `$(sparkle) Claude 修改了 ${hunks.length} 處`, command: 'claudeInlineDiff.openSideBySide', arguments: [uri] }),
+      new vscode.CodeLens(top, { title: `$(sparkle) Claude 修改了 ${hunks.length} 處（行內檢視）`, command: 'claudeInlineDiff.openReview', arguments: [uri] }),
       new vscode.CodeLens(top, { title: '$(check-all) 全部接受', command: 'claudeInlineDiff.acceptFile', arguments: [uri] }),
       new vscode.CodeLens(top, { title: '$(close-all) 全部拒絕', command: 'claudeInlineDiff.rejectFile', arguments: [uri] }),
     ];
     hunks.forEach((h, idx) => {
-      const r = new vscode.Range(Math.min(h.cStart, last), 0, Math.min(h.cStart, last), 0);
+      const line = Math.min(h.cStart, last);
+      const r = new vscode.Range(line, 0, line, 0);
       lenses.push(
         new vscode.CodeLens(r, { title: '$(check) 接受', command: 'claudeInlineDiff.acceptHunk', arguments: [uri, idx] }),
         new vscode.CodeLens(r, { title: '$(close) 拒絕', command: 'claudeInlineDiff.rejectHunk', arguments: [uri, idx] }),
@@ -222,8 +268,11 @@ async function replaceDoc(doc: vscode.TextDocument, text: string) {
   await doc.save();
 }
 
-function settleIfDone(doc: vscode.TextDocument, b: Baseline) {
-  if (splitLines(b.content).join('\n') === splitLines(doc.getText()).join('\n')) clearBaseline(b);
+async function settleIfDone(doc: vscode.TextDocument, b: Baseline) {
+  if (!sameText(b.content, doc.getText())) return;
+  clearBaseline(b);
+  // 審完後回到一般編輯器
+  await vscode.window.showTextDocument(doc, { preview: false });
 }
 
 async function acceptHunk(uriStr: string, idx: number) {
@@ -236,7 +285,7 @@ async function acceptHunk(uriStr: string, idx: number) {
   lines.splice(h.bStart, h.removed.length, ...h.added);
   b.content = lines.join(eolOf(doc));
   saveBaseline(b);
-  settleIfDone(doc, b);
+  await settleIfDone(doc, b);
   refreshAll();
 }
 
@@ -249,15 +298,16 @@ async function rejectHunk(uriStr: string, idx: number) {
   const lines = splitLines(doc.getText());
   lines.splice(h.cStart, h.added.length, ...h.removed);
   await replaceDoc(doc, lines.join(eolOf(doc)));
-  settleIfDone(doc, b);
+  await settleIfDone(doc, b);
   refreshAll();
 }
 
 async function acceptFile(uriStr?: string) {
   const doc = await resolveDoc(uriStr);
   const b = doc && baselineFor(doc);
-  if (!b) return;
+  if (!doc || !b) return;
   clearBaseline(b);
+  await vscode.window.showTextDocument(doc, { preview: false });
   refreshAll();
 }
 
@@ -270,11 +320,14 @@ async function rejectFile(uriStr?: string) {
       `${path.basename(b.path)} 是 Claude 新建的檔案，拒絕會將它移到資源回收筒。`, { modal: true }, '移除檔案');
     if (ok !== '移除檔案') return;
     clearBaseline(b);
-    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+    const tabs = vscode.window.tabGroups.all.flatMap(g => g.tabs)
+      .filter(t => t.input instanceof vscode.TabInputText && key(t.input.uri.fsPath) === key(b.path));
+    await vscode.window.tabGroups.close(tabs);
     await vscode.workspace.fs.delete(doc.uri, { useTrash: true });
   } else {
     await replaceDoc(doc, splitLines(b.content).join(eolOf(doc)));
     clearBaseline(b);
+    await vscode.window.showTextDocument(doc, { preview: false });
   }
   refreshAll();
 }
@@ -304,14 +357,12 @@ async function listFiles() {
     return;
   }
   const pick = await vscode.window.showQuickPick(items, { placeHolder: '選擇要檢視的檔案' });
-  if (pick) await vscode.window.showTextDocument(vscode.Uri.file(pick.path));
+  if (pick) await openReview(pick.path);
 }
 
-async function openSideBySide(uriStr?: string) {
+async function openReviewCommand(uriStr?: string) {
   const doc = await resolveDoc(uriStr);
-  if (!doc || !baselineFor(doc)) return;
-  const base = vscode.Uri.from({ scheme: BASELINE_SCHEME, path: doc.uri.path, query: doc.uri.fsPath });
-  await vscode.commands.executeCommand('vscode.diff', base, doc.uri, `${path.basename(doc.uri.fsPath)}（Claude 修改前 ↔ 目前）`);
+  if (doc && baselineFor(doc)) await openReview(doc.uri.fsPath);
 }
 
 // 把 PreToolUse hook 寫進工作區的 .claude/settings.local.json
@@ -325,7 +376,7 @@ async function installHook(context: vscode.ExtensionContext) {
   let settings: any = {};
   if (fs.existsSync(settingsPath)) {
     try {
-      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      settings = JSON.parse(stripBom(fs.readFileSync(settingsPath, 'utf8')));
     } catch {
       vscode.window.showErrorMessage(`${settingsPath} 不是合法的 JSON，請先修正。`);
       return;
@@ -347,6 +398,7 @@ async function installHook(context: vscode.ExtensionContext) {
 }
 
 export function activate(context: vscode.ExtensionContext) {
+  extContext = context;
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusItem.command = 'claudeInlineDiff.listFiles';
 
@@ -358,16 +410,22 @@ export function activate(context: vscode.ExtensionContext) {
     watcher.onDidDelete(u => { dropSnapshot(u.fsPath); scheduleRefresh(); });
     context.subscriptions.push(watcher);
   }
+  // 已在檢視中的檔案不再自動重開
+  for (const t of vscode.window.tabGroups.all.flatMap(g => g.tabs)) {
+    if (isReviewTab(t)) reviewOpened.add(key((t.input as vscode.TabInputTextDiff).modified.fsPath));
+  }
 
   context.subscriptions.push(
     statusItem,
-    addedDeco, removedDeco, removedMarkerDeco,
+    addedDeco, removedMarkerDeco,
     vscode.languages.registerCodeLensProvider({ scheme: 'file' }, new HunkCodeLens()),
     vscode.workspace.registerTextDocumentContentProvider(BASELINE_SCHEME, {
+      onDidChange: baselineDocEmitter.event,
       provideTextDocumentContent: uri => baselines.get(key(uri.query))?.content ?? '',
     }),
     vscode.workspace.onDidChangeTextDocument(e => { if (baselineFor(e.document)) scheduleRefresh(); }),
     vscode.window.onDidChangeVisibleTextEditors(scheduleRefresh),
+    vscode.window.tabGroups.onDidChangeTabs(scheduleRefresh),
     vscode.commands.registerCommand('claudeInlineDiff.installHook', () => installHook(context)),
     vscode.commands.registerCommand('claudeInlineDiff.acceptHunk', acceptHunk),
     vscode.commands.registerCommand('claudeInlineDiff.rejectHunk', rejectHunk),
@@ -376,7 +434,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('claudeInlineDiff.nextHunk', () => jumpHunk(1)),
     vscode.commands.registerCommand('claudeInlineDiff.prevHunk', () => jumpHunk(-1)),
     vscode.commands.registerCommand('claudeInlineDiff.listFiles', listFiles),
-    vscode.commands.registerCommand('claudeInlineDiff.openSideBySide', openSideBySide),
+    vscode.commands.registerCommand('claudeInlineDiff.openReview', openReviewCommand),
   );
   refreshAll();
 }
