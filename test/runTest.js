@@ -8,9 +8,9 @@ const { runTests } = require('@vscode/test-electron');
 const root = path.resolve(__dirname, '..');
 const hook = path.join(root, 'hooks', 'inline-diff-snapshot.js');
 
-function runHook(ws, file) {
+function runHook(ws, event, file) {
   cp.execFileSync(process.execPath, [hook], {
-    input: JSON.stringify({ cwd: ws, tool_name: 'Edit', tool_input: { file_path: file } }),
+    input: JSON.stringify({ cwd: ws, hook_event_name: event, tool_name: 'Edit', tool_input: { file_path: file } }),
     env: { ...process.env, CLAUDE_PROJECT_DIR: ws },
   });
 }
@@ -22,18 +22,20 @@ async function main() {
   fs.mkdirSync(out, { recursive: true });
   fs.mkdirSync(path.join(ws, '.vscode'));
   fs.writeFileSync(path.join(ws, '.vscode', 'settings.json'), JSON.stringify({
-    'diffEditor.renderSideBySide': false,
-    'diffEditor.codeLens': true,
     'workbench.startupEditor': 'none',
     'security.workspace.trust.enabled': false,
   }));
 
-  // 情境 1：VS Code 啟動前 Claude 已改過檔案（帶 BOM 的 appsettings.json，刪掉一個區塊）
+  // VS Code 啟動前 Claude 已改過檔案（模擬 Reload 後恢復）：參考圖片的 appsettings.json，
+  // 刪除「快速入口」物件，並把「我的差勤」改成「我的差勤差勤」
   const demo = path.join(ws, 'appsettings.json');
   fs.copyFileSync(path.join(__dirname, 'fixtures', 'appsettings.json'), demo);
-  runHook(ws, demo);
-  const text = fs.readFileSync(demo, 'utf8');
-  fs.writeFileSync(demo, text.replace(/ {6}\{\r\n {8}"Title": "快速入口",[\s\S]*?\r\n {6}\},\r\n/, ''));
+  runHook(ws, 'PreToolUse', demo);
+  const text = fs.readFileSync(demo, 'utf8')
+    .replace(/ {6}\{\r\n {8}"Title": "快速入口",[\s\S]*?\r\n {6}\},\r\n/, '')
+    .replace('"我的差勤"', '"我的差勤差勤"');
+  fs.writeFileSync(demo, text);
+  runHook(ws, 'PostToolUse', demo);
 
   // 測試端要求截圖時，由這裡（一般 Node 程序）擷取測試視窗
   const req = path.join(out, 'shot-request');
@@ -50,8 +52,9 @@ async function main() {
     fs.writeFileSync(req + '.done', '');
   }, 200);
 
-  const vscodeExecutablePath = process.env.VSCODE_EXE
-    || path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Microsoft VS Code', 'Code.exe');
+  // 預設下載一份獨立的 VS Code（快取在 .vscode-test），不動到使用者自己安裝的版本；
+  // 要用已安裝的版本測試可設定環境變數 VSCODE_EXE
+  const vscodeExecutablePath = process.env.VSCODE_EXE || undefined;
   try {
     await runTests({
       vscodeExecutablePath,

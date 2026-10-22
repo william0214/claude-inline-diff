@@ -11,3 +11,5 @@ node_modules/**
 test/**
 test-output/**
 .gitattributes
+.vscode-test/**
+.claude/**

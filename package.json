@@ -1,8 +1,8 @@
 {
   "name": "claude-inline-diff",
   "displayName": "Claude Inline Diff",
-  "description": "在編輯器內以紅綠行內標示顯示 Claude Code 的修改，並可逐段接受 / 拒絕（類似 GitHub Copilot）",
-  "version": "0.2.0",
+  "description": "在原始檔案編輯器內審查 Claude Code 的修改：新增為綠色、刪除的原始程式碼以紅色區塊顯示，可逐段保留 / 復原，並提供已變更檔案清單（類似 GitHub Copilot）",
+  "version": "0.3.0",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -16,6 +16,24 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudeInlineDiff",
+          "title": "Claude 修改審查",
+          "icon": "media/review.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudeInlineDiff": [
+        {
+          "type": "webview",
+          "id": "claudeInlineDiff.changedFiles",
+          "name": "已變更檔案"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "claudeInlineDiff.installHook",
@@ -23,11 +41,21 @@
       },
       {
         "command": "claudeInlineDiff.acceptFile",
-        "title": "Claude Inline Diff: 接受此檔案全部修改"
+        "title": "Claude Inline Diff: 保留此檔案全部修改"
       },
       {
         "command": "claudeInlineDiff.rejectFile",
-        "title": "Claude Inline Diff: 拒絕此檔案全部修改"
+        "title": "Claude Inline Diff: 復原此檔案全部修改"
+      },
+      {
+        "command": "claudeInlineDiff.acceptAll",
+        "title": "Claude Inline Diff: 保留所有檔案的修改",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "claudeInlineDiff.rejectAll",
+        "title": "Claude Inline Diff: 復原所有檔案的修改",
+        "icon": "$(discard)"
       },
       {
         "command": "claudeInlineDiff.nextHunk",
@@ -39,22 +67,75 @@
       },
       {
         "command": "claudeInlineDiff.listFiles",
-        "title": "Claude Inline Diff: 列出所有待審檔案"
+        "title": "Claude Inline Diff: 列出所有待審查檔案"
       },
       {
-        "command": "claudeInlineDiff.openReview",
-        "title": "Claude Inline Diff: 以行內 diff 檢視此檔案"
+        "command": "claudeInlineDiff.compareFile",
+        "title": "Claude Inline Diff: 以 diff 檢視比對此檔案"
+      },
+      {
+        "command": "claudeInlineDiff.startManualReview",
+        "title": "Claude Inline Diff: 從目前內容開始追蹤此檔案（手動審查模式）"
+      },
+      {
+        "command": "claudeInlineDiff.acceptThread",
+        "title": "保留",
+        "icon": "$(check)"
+      },
+      {
+        "command": "claudeInlineDiff.rejectThread",
+        "title": "復原",
+        "icon": "$(discard)"
       }
     ],
+    "menus": {
+      "comments/commentThread/title": [
+        {
+          "command": "claudeInlineDiff.acceptThread",
+          "group": "inline@1",
+          "when": "commentController == claude-inline-diff"
+        },
+        {
+          "command": "claudeInlineDiff.rejectThread",
+          "group": "inline@2",
+          "when": "commentController == claude-inline-diff && commentThread == pending"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "claudeInlineDiff.acceptThread",
+          "when": "false"
+        },
+        {
+          "command": "claudeInlineDiff.rejectThread",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "claudeInlineDiff.acceptAll",
+          "when": "view == claudeInlineDiff.changedFiles",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeInlineDiff.rejectAll",
+          "when": "view == claudeInlineDiff.changedFiles",
+          "group": "navigation@2"
+        }
+      ]
+    },
     "configuration": {
       "title": "Claude Inline Diff",
       "properties": {
         "claudeInlineDiff.autoOpen": {
           "type": "boolean",
-          "default": true,
-          "description": "Claude 修改檔案後，自動以行內 diff 開啟該檔案（刪除的行顯示為紅色區塊）"
+          "default": false,
+          "description": "Claude 修改檔案後，自動在編輯器開啟該檔案並定位到修改處（預設關閉，可從「已變更檔案」清單開啟）"
         }
       }
+    },
+    "configurationDefaults": {
+      "comments.openView": "never"
     },
     "keybindings": [
       {

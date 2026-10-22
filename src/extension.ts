@@ -1,386 +1,242 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { diffLines, splitLines, Hunk } from './diff';
+import { stripBom } from './diff';
+import {
+  SessionStore, FileSession, ReviewHunk, acceptInSession, rejectInSession, isSettled, currentText, openDocument,
+} from './session';
+import { ReviewManager } from './review';
+import { ChangedFilesView, CHANGED_FILES_VIEW } from './changedFiles';
 
-// hook 在 Claude 修改檔案前存下的原始內容
-interface Baseline {
-  path: string;
-  existed: boolean;
-  content: string;
-  snapshotFile: string;
-}
-
-const BASELINE_DIR = path.join('.claude', 'inline-diff');
 const HOOK_SCRIPT = 'inline-diff-snapshot.js';
 const BASELINE_SCHEME = 'claude-inline-diff-base';
 
-const baselines = new Map<string, Baseline>();
-const codeLensEmitter = new vscode.EventEmitter<void>();
-const baselineDocEmitter = new vscode.EventEmitter<vscode.Uri>();
-// 已自動開啟過檢視的檔案，避免重複開分頁
-const reviewOpened = new Set<string>();
+let store: SessionStore;
+let reviews: ReviewManager;
 
-const realPathCache = new Map<string, string>();
+// ---------- 文件編輯 ----------
 
-// 轉成真實完整路徑再比對（Windows 8.3 短檔名、symlink），與 hook 記錄的路徑一致
-function key(p: string): string {
-  let real = realPathCache.get(p);
-  if (real === undefined) {
-    try {
-      real = fs.realpathSync.native(p);
-    } catch {
-      try {
-        real = path.join(fs.realpathSync.native(path.dirname(p)), path.basename(p));
-      } catch {
-        real = path.normalize(p);
-      }
-    }
-    realPathCache.set(p, real);
-  }
-  return process.platform === 'win32' ? real.toLowerCase() : real;
-}
-
-function stripBom(s: string): string {
-  return s.replace(/^﻿/, '');
-}
-
-function sameText(a: string, b: string): boolean {
-  return splitLines(stripBom(a)).join('\n') === splitLines(stripBom(b)).join('\n');
-}
-
-function eolOf(doc: vscode.TextDocument): string {
-  return doc.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
-}
-
-function baseUri(filePath: string): vscode.Uri {
-  return vscode.Uri.from({ scheme: BASELINE_SCHEME, path: vscode.Uri.file(filePath).path, query: filePath });
-}
-
-function baselineFor(doc: vscode.TextDocument): Baseline | undefined {
-  return doc.uri.scheme === 'file' ? baselines.get(key(doc.uri.fsPath)) : undefined;
-}
-
-function hunksFor(doc: vscode.TextDocument): Hunk[] {
-  const b = baselineFor(doc);
-  return b ? diffLines(splitLines(b.content), splitLines(doc.getText())) : [];
-}
-
-// ---------- baseline 檔案的讀寫 ----------
-
-function loadSnapshot(file: string) {
-  try {
-    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (typeof data.path !== 'string') return;
-    for (const [k, b] of baselines) if (b.snapshotFile === file) baselines.delete(k);
-    baselines.set(key(data.path), {
-      path: data.path,
-      existed: data.existed !== false,
-      content: stripBom(String(data.content ?? '')),
-      snapshotFile: file,
-    });
-    baselineDocEmitter.fire(baseUri(data.path));
-  } catch {
-    // hook 可能還在寫入中，等下一次 change 事件
-  }
-}
-
-function dropSnapshot(file: string) {
-  for (const [k, b] of baselines) {
-    if (b.snapshotFile !== file) continue;
-    baselines.delete(k);
-    reviewOpened.delete(k);
-    closeReviewTabs(b.path);
-  }
-}
-
-function saveBaseline(b: Baseline) {
-  fs.writeFileSync(b.snapshotFile, JSON.stringify({ path: b.path, existed: b.existed, content: b.content }));
-  baselineDocEmitter.fire(baseUri(b.path));
-}
-
-function clearBaseline(b: Baseline) {
-  baselines.delete(key(b.path));
-  reviewOpened.delete(key(b.path));
-  try { fs.unlinkSync(b.snapshotFile); } catch { /* 已不存在 */ }
-  closeReviewTabs(b.path);
-}
-
-function scanFolder(folder: vscode.WorkspaceFolder) {
-  const dir = path.join(folder.uri.fsPath, BASELINE_DIR);
-  if (!fs.existsSync(dir)) return;
-  for (const f of fs.readdirSync(dir)) if (f.endsWith('.json')) loadSnapshot(path.join(dir, f));
-}
-
-// ---------- 行內 diff 檢視（刪除的行以真正的紅色區塊顯示） ----------
-
-function isReviewTab(tab: vscode.Tab, filePath?: string): boolean {
-  const input = tab.input;
-  return input instanceof vscode.TabInputTextDiff
-    && input.original.scheme === BASELINE_SCHEME
-    && (filePath === undefined || key(input.modified.fsPath) === key(filePath));
-}
-
-function closeReviewTabs(filePath: string) {
-  const tabs = vscode.window.tabGroups.all.flatMap(g => g.tabs).filter(t => isReviewTab(t, filePath));
-  if (tabs.length > 0) void vscode.window.tabGroups.close(tabs);
-}
-
-// 編輯器是否正位於本擴充套件開的 diff 檢視中（diff 自己會畫紅綠，不需再加裝飾）
-function inReviewDiff(editor: vscode.TextEditor): boolean {
-  const group = vscode.window.tabGroups.all.find(g => g.viewColumn === editor.viewColumn);
-  return !!group?.activeTab && isReviewTab(group.activeTab, editor.document.uri.fsPath);
-}
-
-let extContext: vscode.ExtensionContext;
-
-// diff 檢視預設是左右對照，且不顯示 CodeLens；第一次使用時詢問是否切成行內模式
-async function ensureInlineSettings() {
-  const cfg = vscode.workspace.getConfiguration('diffEditor');
-  if (cfg.get('renderSideBySide') === false && cfg.get('codeLens') === true) return;
-  if (extContext.globalState.get('inlineSettingsAsked')) return;
-  await extContext.globalState.update('inlineSettingsAsked', true);
-  const pick = await vscode.window.showInformationMessage(
-    'Claude Inline Diff：要把 VS Code 的 diff 檢視改為「行內模式」並顯示接受 / 拒絕按鈕嗎？（會套用到所有 diff 檢視）',
-    '套用', '保持原樣');
-  if (pick !== '套用') return;
-  await cfg.update('renderSideBySide', false, vscode.ConfigurationTarget.Global);
-  await cfg.update('codeLens', true, vscode.ConfigurationTarget.Global);
-}
-
-async function openReview(filePath: string, preserveFocus = false) {
-  void ensureInlineSettings();
-  const file = vscode.Uri.file(filePath);
-  await vscode.commands.executeCommand(
-    'vscode.diff', baseUri(filePath), file,
-    `${path.basename(filePath)}（Claude 的修改）`,
-    { preview: false, preserveFocus },
-  );
-}
-
-function currentText(b: Baseline): string | undefined {
-  const doc = vscode.workspace.textDocuments.find(d => d.uri.scheme === 'file' && key(d.uri.fsPath) === key(b.path));
-  if (doc) return doc.getText();
-  try { return fs.readFileSync(b.path, 'utf8'); } catch { return undefined; }
-}
-
-// Claude 一改完檔案就自動開啟行內 diff
-function autoOpenReviews() {
-  if (!vscode.workspace.getConfiguration('claudeInlineDiff').get('autoOpen', true)) return;
-  for (const [k, b] of baselines) {
-    if (reviewOpened.has(k)) continue;
-    const text = currentText(b);
-    if (text === undefined || sameText(b.content, text)) continue;
-    reviewOpened.add(k);
-    void openReview(b.path, true);
-  }
-}
-
-// ---------- 一般編輯器中的提示（未開 diff 時） ----------
-
-const addedDeco = vscode.window.createTextEditorDecorationType({
-  isWholeLine: true,
-  backgroundColor: new vscode.ThemeColor('diffEditor.insertedLineBackground'),
-  overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.addedForeground'),
-  overviewRulerLane: vscode.OverviewRulerLane.Left,
-});
-
-const removedMarkerDeco = vscode.window.createTextEditorDecorationType({
-  isWholeLine: true,
-  borderStyle: 'solid',
-  borderWidth: '2px 0 0 0',
-  borderColor: new vscode.ThemeColor('editorGutter.deletedBackground'),
-  overviewRulerColor: new vscode.ThemeColor('editorOverviewRuler.deletedForeground'),
-  overviewRulerLane: vscode.OverviewRulerLane.Left,
-});
-
-function removedHover(h: Hunk): vscode.MarkdownString {
-  const md = new vscode.MarkdownString(`**Claude 刪除了 ${h.removed.length} 行：**`);
-  md.appendCodeblock(h.removed.join('\n'));
-  return md;
-}
-
-function refreshEditor(editor: vscode.TextEditor) {
-  const doc = editor.document;
-  const hunks = inReviewDiff(editor) ? [] : hunksFor(doc);
-  const added: vscode.DecorationOptions[] = [];
-  const markers: vscode.DecorationOptions[] = [];
-  const last = Math.max(0, doc.lineCount - 1);
-
-  for (const h of hunks) {
-    for (let k = 0; k < h.added.length && h.cStart + k <= last; k++) {
-      added.push({ range: doc.lineAt(h.cStart + k).range });
-    }
-    if (h.removed.length > 0) {
-      markers.push({ range: doc.lineAt(Math.min(h.cStart, last)).range, hoverMessage: removedHover(h) });
-    }
-  }
-  editor.setDecorations(addedDeco, added);
-  editor.setDecorations(removedMarkerDeco, markers);
-}
-
-let statusItem: vscode.StatusBarItem;
-
-function refreshAll() {
-  autoOpenReviews();
-  for (const e of vscode.window.visibleTextEditors) refreshEditor(e);
-  codeLensEmitter.fire();
-  const n = baselines.size;
-  if (n > 0) {
-    statusItem.text = `$(diff) Claude：${n} 個檔案待審`;
-    statusItem.show();
+// 以 WorkspaceEdit 把目前文件第 start 行起的 count 行換成 lines（可正常 Undo / Redo）
+function replaceLines(edit: vscode.WorkspaceEdit, doc: vscode.TextDocument, start: number, count: number, lines: string[]) {
+  const eol = doc.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
+  const end = start + count;
+  if (end < doc.lineCount) {
+    edit.replace(doc.uri, new vscode.Range(start, 0, end, 0), lines.map(l => l + eol).join(''));
+  } else if (start === 0) {
+    edit.replace(doc.uri, new vscode.Range(0, 0, doc.lineCount, 0), lines.join(eol));
   } else {
-    statusItem.hide();
+    // 修改觸及檔尾：從上一行行尾開始取代，避免多出或吃掉最後的換行
+    const from = doc.lineAt(start - 1).range.end;
+    const to = doc.lineAt(doc.lineCount - 1).range.end;
+    edit.replace(doc.uri, new vscode.Range(from, to), lines.map(l => eol + l).join(''));
   }
 }
 
-let refreshTimer: NodeJS.Timeout | undefined;
-function scheduleRefresh() {
-  if (refreshTimer) clearTimeout(refreshTimer);
-  refreshTimer = setTimeout(refreshAll, 80);
+async function saveIfWasClean(doc: vscode.TextDocument, wasDirty: boolean) {
+  // 原本沒有未儲存內容才自動存檔，讓 Claude Code 下一輪讀到復原後的內容；不替使用者存下他自己的未儲存修改
+  if (!wasDirty) await doc.save();
 }
 
-// ---------- CodeLens：接受 / 拒絕 ----------
-
-class HunkCodeLens implements vscode.CodeLensProvider {
-  onDidChangeCodeLenses = codeLensEmitter.event;
-
-  provideCodeLenses(doc: vscode.TextDocument): vscode.CodeLens[] {
-    const hunks = hunksFor(doc);
-    if (hunks.length === 0) return [];
-    const uri = doc.uri.toString();
-    const last = Math.max(0, doc.lineCount - 1);
-    const top = new vscode.Range(0, 0, 0, 0);
-    const lenses = [
-      new vscode.CodeLens(top, { title: `$(sparkle) Claude 修改了 ${hunks.length} 處（行內檢視）`, command: 'claudeInlineDiff.openReview', arguments: [uri] }),
-      new vscode.CodeLens(top, { title: '$(check-all) 全部接受', command: 'claudeInlineDiff.acceptFile', arguments: [uri] }),
-      new vscode.CodeLens(top, { title: '$(close-all) 全部拒絕', command: 'claudeInlineDiff.rejectFile', arguments: [uri] }),
-    ];
-    hunks.forEach((h, idx) => {
-      const line = Math.min(h.cStart, last);
-      const r = new vscode.Range(line, 0, line, 0);
-      lenses.push(
-        new vscode.CodeLens(r, { title: '$(check) 接受', command: 'claudeInlineDiff.acceptHunk', arguments: [uri, idx] }),
-        new vscode.CodeLens(r, { title: '$(close) 拒絕', command: 'claudeInlineDiff.rejectHunk', arguments: [uri, idx] }),
-      );
-    });
-    return lenses;
-  }
+function settle(s: FileSession) {
+  if (isSettled(s, currentText(s.path))) store.clear(s);
+  else store.save(s);
 }
 
-// ---------- 指令 ----------
+// ---------- 單一 hunk ----------
 
-async function resolveDoc(uriStr?: string): Promise<vscode.TextDocument | undefined> {
-  if (uriStr) return vscode.workspace.openTextDocument(vscode.Uri.parse(uriStr));
-  return vscode.window.activeTextEditor?.document;
+async function acceptHunk(filePath: string, id: string) {
+  const s = store.get(filePath);
+  const h = reviews.findHunk(filePath, id);
+  if (!s || !h) return staleNotice();
+  acceptInSession(s, h);
+  settle(s);
+  reviews.refresh();
 }
 
-async function replaceDoc(doc: vscode.TextDocument, text: string) {
+async function rejectHunk(filePath: string, id: string) {
+  const s = store.get(filePath);
+  const h = reviews.findHunk(filePath, id);
+  if (!s || !h) return staleNotice();
+  if (h.status === 'conflicted') return explainConflict();
+  const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.path));
+  // 套用前再核對一次，避免文件已變動而還原到錯誤位置
+  const fresh = reviews.findHunk(filePath, id);
+  if (!fresh || fresh.status !== 'pending' || !linesMatch(doc, fresh)) return explainConflict();
+  const wasDirty = doc.isDirty;
   const edit = new vscode.WorkspaceEdit();
-  edit.replace(doc.uri, new vscode.Range(0, 0, doc.lineCount, 0), text);
-  await vscode.workspace.applyEdit(edit);
-  // 存檔，讓 Claude Code 下一輪讀到的是拒絕後的內容
-  await doc.save();
+  replaceLines(edit, doc, fresh.curStart, fresh.added.length, fresh.removed);
+  if (!await vscode.workspace.applyEdit(edit)) return;
+  rejectInSession(s, fresh);
+  await saveIfWasClean(doc, wasDirty);
+  settle(s);
+  reviews.refresh();
 }
 
-async function settleIfDone(doc: vscode.TextDocument, b: Baseline) {
-  if (!sameText(b.content, doc.getText())) return;
-  clearBaseline(b);
-  // 審完後回到一般編輯器
-  await vscode.window.showTextDocument(doc, { preview: false });
+function linesMatch(doc: vscode.TextDocument, h: ReviewHunk): boolean {
+  return h.added.every((l, i) => h.curStart + i < doc.lineCount && doc.lineAt(h.curStart + i).text === l);
 }
 
-async function acceptHunk(uriStr: string, idx: number) {
-  const doc = await resolveDoc(uriStr);
-  const b = doc && baselineFor(doc);
-  const h = doc && hunksFor(doc)[idx];
-  if (!doc || !b || !h) return;
-  // 接受 = 把這段修改併入 baseline
-  const lines = splitLines(b.content);
-  lines.splice(h.bStart, h.removed.length, ...h.added);
-  b.content = lines.join(eolOf(doc));
-  saveBaseline(b);
-  await settleIfDone(doc, b);
-  refreshAll();
+function staleNotice() {
+  vscode.window.showInformationMessage('這段修改已經處理過或已過時，畫面已重新整理。');
+  reviews.refresh();
 }
 
-async function rejectHunk(uriStr: string, idx: number) {
-  const doc = await resolveDoc(uriStr);
-  const b = doc && baselineFor(doc);
-  const h = doc && hunksFor(doc)[idx];
-  if (!doc || !b || !h) return;
-  // 拒絕 = 把檔案這段還原成 baseline
-  const lines = splitLines(doc.getText());
-  lines.splice(h.cStart, h.added.length, ...h.removed);
-  await replaceDoc(doc, lines.join(eolOf(doc)));
-  await settleIfDone(doc, b);
-  refreshAll();
+function explainConflict() {
+  vscode.window.showWarningMessage('這段 Claude 的修改之後又被手動編輯過，為避免覆蓋你的修改，無法自動復原。可以選擇保留，或手動調整後再保留。');
 }
 
-async function acceptFile(uriStr?: string) {
-  const doc = await resolveDoc(uriStr);
-  const b = doc && baselineFor(doc);
-  if (!doc || !b) return;
-  clearBaseline(b);
-  await vscode.window.showTextDocument(doc, { preview: false });
-  refreshAll();
+// ---------- 整個檔案 / 整個 Session ----------
+
+async function acceptFile(filePath?: string) {
+  const p = filePath ?? activePath();
+  const s = p ? store.get(p) : undefined;
+  if (!s) return;
+  // 只把 AI 的變更併入 base；使用者的手動修改本來就不在審查範圍
+  s.base = s.ai ?? stripBom(currentText(s.path) ?? '');
+  store.clear(s);
+  reviews.refresh();
 }
 
-async function rejectFile(uriStr?: string) {
-  const doc = await resolveDoc(uriStr);
-  const b = doc && baselineFor(doc);
-  if (!doc || !b) return;
-  if (!b.existed) {
-    const ok = await vscode.window.showWarningMessage(
-      `${path.basename(b.path)} 是 Claude 新建的檔案，拒絕會將它移到資源回收筒。`, { modal: true }, '移除檔案');
-    if (ok !== '移除檔案') return;
-    clearBaseline(b);
-    const tabs = vscode.window.tabGroups.all.flatMap(g => g.tabs)
-      .filter(t => t.input instanceof vscode.TabInputText && key(t.input.uri.fsPath) === key(b.path));
-    await vscode.window.tabGroups.close(tabs);
-    await vscode.workspace.fs.delete(doc.uri, { useTrash: true });
-  } else {
-    await replaceDoc(doc, splitLines(b.content).join(eolOf(doc)));
-    clearBaseline(b);
-    await vscode.window.showTextDocument(doc, { preview: false });
+// 復原檔案中所有待審查的變更；有衝突的區塊跳過並回報筆數
+async function rejectFile(filePath?: string, opts: { quiet?: boolean } = {}): Promise<number> {
+  const p = filePath ?? activePath();
+  const s = p ? store.get(p) : undefined;
+  const review = p ? reviews.review(p) : undefined;
+  if (!s || !review) return 0;
+
+  if (review.missing) {
+    // 檔案已被刪除：用 AI 修改前的內容重建
+    if (s.existed) await vscode.workspace.fs.writeFile(vscode.Uri.file(s.path), Buffer.from(s.base, 'utf8'));
+    store.clear(s);
+    reviews.refresh();
+    return 0;
   }
-  refreshAll();
+
+  const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(s.path));
+  const pending = review.hunks.filter(h => h.status === 'pending' && linesMatch(doc, h));
+  const conflicted = review.hunks.length - pending.length;
+  const wasDirty = doc.isDirty;
+  if (pending.length) {
+    const edit = new vscode.WorkspaceEdit();
+    for (const h of pending) replaceLines(edit, doc, h.curStart, h.added.length, h.removed);
+    if (!await vscode.workspace.applyEdit(edit)) return conflicted;
+    // 由後往前更新 ai，避免位移
+    for (const h of [...pending].sort((a, b) => b.aiStart - a.aiStart)) rejectInSession(s, h);
+    await saveIfWasClean(doc, wasDirty);
+  }
+
+  if (!s.existed && conflicted === 0 && doc.getText().trim() === '') {
+    // Claude 新建的檔案全部復原後是空的：詢問是否刪除檔案
+    const ok = opts.quiet ? '保留空檔案' : await vscode.window.showWarningMessage(
+      `${path.basename(s.path)} 是 Claude 新建的檔案，已復原為空白。要移到資源回收筒嗎？`, '移除檔案', '保留空檔案');
+    if (ok === '移除檔案') {
+      store.clear(s);
+      await vscode.workspace.fs.delete(doc.uri, { useTrash: true });
+      reviews.refresh();
+      return 0;
+    }
+  }
+  settle(s);
+  reviews.refresh();
+  if (conflicted && !opts.quiet) {
+    vscode.window.showWarningMessage(`${path.basename(s.path)} 有 ${conflicted} 處修改之後被手動編輯過，已略過未復原。`);
+  }
+  return conflicted;
+}
+
+async function acceptAll() {
+  for (const r of reviews.reviews()) await acceptFile(r.session.path);
+}
+
+async function rejectAll(opts: { confirm?: boolean } = {}) {
+  const files = reviews.reviews();
+  if (!files.length) return;
+  if (opts.confirm !== false) {
+    const ok = await vscode.window.showWarningMessage(
+      `要復原 Claude 在 ${files.length} 個檔案中的所有待審查修改嗎？（之後被手動編輯過的區塊會略過）`, { modal: true }, '全部復原');
+    if (ok !== '全部復原') return;
+  }
+  let conflicted = 0;
+  for (const r of files) conflicted += await rejectFile(r.session.path, { quiet: true });
+  if (conflicted) vscode.window.showWarningMessage(`共有 ${conflicted} 處修改之後被手動編輯過，已略過未復原，請手動處理。`);
+}
+
+// ---------- 開檔與導覽 ----------
+
+function activePath(): string | undefined {
+  const uri = vscode.window.activeTextEditor?.document.uri;
+  return uri?.scheme === 'file' ? uri.fsPath : undefined;
+}
+
+// 開啟原始檔案（已開啟就切過去，不重複開分頁）並定位到第一個待審查的修改
+async function openChangedFile(filePath: string) {
+  const review = reviews.review(filePath);
+  if (review?.missing) {
+    const pick = await vscode.window.showWarningMessage(`${path.basename(filePath)} 已被刪除。`, '復原檔案', '確認刪除');
+    if (pick === '復原檔案') await rejectFile(filePath);
+    if (pick === '確認刪除') await acceptFile(filePath);
+    return;
+  }
+  const doc = openDocument(filePath) ?? await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+  const editor = await vscode.window.showTextDocument(doc, { preview: false });
+  const first = reviews.review(filePath)?.hunks.find(h => h.status === 'pending') ?? reviews.review(filePath)?.hunks[0];
+  if (first) reveal(editor, first);
+}
+
+function reveal(editor: vscode.TextEditor, h: ReviewHunk) {
+  const line = Math.min(h.curStart, editor.document.lineCount - 1);
+  const pos = new vscode.Position(line, 0);
+  editor.selection = new vscode.Selection(pos, pos);
+  // 往上多留幾行，讓上方的刪除區塊也在畫面內
+  const top = new vscode.Position(Math.max(0, line - h.removed.length - 3), 0);
+  editor.revealRange(new vscode.Range(top, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 }
 
 function jumpHunk(dir: 1 | -1) {
   const editor = vscode.window.activeTextEditor;
-  if (!editor) return;
-  const starts = hunksFor(editor.document).map(h => Math.min(h.cStart, editor.document.lineCount - 1));
-  if (starts.length === 0) return;
+  const hunks = editor && reviews.review(editor.document.uri.fsPath)?.hunks;
+  if (!editor || !hunks?.length) return;
   const cur = editor.selection.active.line;
+  const sorted = [...hunks].sort((a, b) => a.curStart - b.curStart);
   const target = dir === 1
-    ? starts.find(s => s > cur) ?? starts[0]
-    : [...starts].reverse().find(s => s < cur) ?? starts[starts.length - 1];
-  const pos = new vscode.Position(target, 0);
-  editor.selection = new vscode.Selection(pos, pos);
-  editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+    ? sorted.find(h => h.curStart > cur) ?? sorted[0]
+    : [...sorted].reverse().find(h => h.curStart < cur) ?? sorted[sorted.length - 1];
+  reveal(editor, target);
 }
 
 async function listFiles() {
-  const items = [...baselines.values()].map(b => ({
-    label: path.basename(b.path),
-    description: vscode.workspace.asRelativePath(b.path),
-    path: b.path,
+  const items = reviews.reviews().map(r => ({
+    label: path.basename(r.session.path),
+    description: `+${r.additions} -${r.deletions}  ${vscode.workspace.asRelativePath(r.session.path)}`,
+    path: r.session.path,
   }));
-  if (items.length === 0) {
-    vscode.window.showInformationMessage('目前沒有待審的 Claude 修改。');
+  if (!items.length) {
+    vscode.window.showInformationMessage('目前沒有待審查的 Claude 修改。');
     return;
   }
-  const pick = await vscode.window.showQuickPick(items, { placeHolder: '選擇要檢視的檔案' });
-  if (pick) await openReview(pick.path);
+  const pick = await vscode.window.showQuickPick(items, { placeHolder: '選擇要審查的檔案' });
+  if (pick) await openChangedFile(pick.path);
 }
 
-async function openReviewCommand(uriStr?: string) {
-  const doc = await resolveDoc(uriStr);
-  if (doc && baselineFor(doc)) await openReview(doc.uri.fsPath);
+// 輔助：以 VS Code diff 檢視比對修改前與目前內容
+async function compareFile(filePath?: string) {
+  const p = filePath ?? activePath();
+  if (!p || !store.get(p)) return;
+  const base = vscode.Uri.from({ scheme: BASELINE_SCHEME, path: vscode.Uri.file(p).path, query: p });
+  await vscode.commands.executeCommand('vscode.diff', base, vscode.Uri.file(p), `${path.basename(p)}（Claude 修改前 ↔ 目前）`);
 }
 
-// 把 PreToolUse hook 寫進工作區的 .claude/settings.local.json
+async function startManualReview() {
+  const doc = vscode.window.activeTextEditor?.document;
+  if (!doc || doc.uri.scheme !== 'file') return;
+  store.startManual(doc.uri.fsPath, doc.getText());
+  vscode.window.showInformationMessage(
+    `已從目前內容開始追蹤 ${path.basename(doc.uri.fsPath)}。手動模式無法分辨 AI 與手動修改，之後此檔案的所有變更都會列入審查。`);
+}
+
+// ---------- hook 安裝 ----------
+
+// 把 PreToolUse / PostToolUse hook 寫進工作區的 .claude/settings.local.json
 async function installHook(context: vscode.ExtensionContext) {
   const folder = vscode.workspace.workspaceFolders?.[0];
   if (!folder) {
@@ -399,59 +255,86 @@ async function installHook(context: vscode.ExtensionContext) {
   }
   const script = path.join(context.extensionPath, 'hooks', HOOK_SCRIPT).replace(/\\/g, '/');
   settings.hooks ??= {};
-  // 移除舊版本留下的設定（擴充套件路徑會隨版本變動）
-  settings.hooks.PreToolUse = (settings.hooks.PreToolUse ?? [])
-    .map((m: any) => ({ ...m, hooks: (m.hooks ?? []).filter((h: any) => !String(h.command ?? '').includes(HOOK_SCRIPT)) }))
-    .filter((m: any) => m.hooks.length > 0);
-  settings.hooks.PreToolUse.push({
-    matcher: 'Edit|Write|MultiEdit',
-    hooks: [{ type: 'command', command: `node "${script}"` }],
-  });
+  for (const event of ['PreToolUse', 'PostToolUse']) {
+    // 移除舊版本留下的設定（擴充套件路徑會隨版本變動）
+    settings.hooks[event] = (settings.hooks[event] ?? [])
+      .map((m: any) => ({ ...m, hooks: (m.hooks ?? []).filter((h: any) => !String(h.command ?? '').includes(HOOK_SCRIPT)) }))
+      .filter((m: any) => m.hooks.length > 0);
+    settings.hooks[event].push({
+      matcher: 'Edit|Write|MultiEdit',
+      hooks: [{ type: 'command', command: `node "${script}"` }],
+    });
+  }
   fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
-  vscode.window.showInformationMessage('已安裝 hook。請重新啟動 Claude Code 對話以套用設定。');
+  vscode.window.showInformationMessage('已安裝 hook。請重新開始 Claude Code 對話以套用設定。');
+}
+
+// ---------- 自動開啟 ----------
+
+const announced = new Map<string, string>();
+
+// 選用：Claude 改完檔案後自動開啟該檔案並定位到修改處（預設關閉，改由「已變更檔案」清單開啟）
+function autoOpen() {
+  const live = new Set<string>();
+  for (const r of reviews.reviews()) {
+    const s = r.session;
+    live.add(s.snapshotFile);
+    const sig = `${s.ai?.length}:${r.hunks.length}`;
+    if (announced.get(s.snapshotFile) === sig) continue;
+    announced.set(s.snapshotFile, sig);
+    if (!vscode.workspace.getConfiguration('claudeInlineDiff').get('autoOpen', false) || r.missing) continue;
+    void vscode.window.showTextDocument(vscode.Uri.file(s.path), { preview: false, preserveFocus: true })
+      .then(editor => { const h = r.hunks[0]; if (h) reveal(editor, h); });
+  }
+  for (const k of announced.keys()) if (!live.has(k)) announced.delete(k);
 }
 
 export function activate(context: vscode.ExtensionContext) {
-  extContext = context;
-  statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-  statusItem.command = 'claudeInlineDiff.listFiles';
+  store = new SessionStore();
+  reviews = new ReviewManager(store);
+  const view = new ChangedFilesView(reviews);
 
-  for (const f of vscode.workspace.workspaceFolders ?? []) {
-    scanFolder(f);
-    const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(f, '.claude/inline-diff/*.json'));
-    watcher.onDidCreate(u => { loadSnapshot(u.fsPath); scheduleRefresh(); });
-    watcher.onDidChange(u => { loadSnapshot(u.fsPath); scheduleRefresh(); });
-    watcher.onDidDelete(u => { dropSnapshot(u.fsPath); scheduleRefresh(); });
-    context.subscriptions.push(watcher);
-  }
-  // 已在檢視中的檔案不再自動重開
-  for (const t of vscode.window.tabGroups.all.flatMap(g => g.tabs)) {
-    if (isReviewTab(t)) reviewOpened.add(key((t.input as vscode.TabInputTextDiff).modified.fsPath));
-  }
+  const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  status.command = 'claudeInlineDiff.listFiles';
+  const updateStatus = () => {
+    const n = reviews.reviews().length;
+    status.text = `$(diff) Claude：${n} 個檔案待審查`;
+    if (n) status.show(); else status.hide();
+  };
+
+  const threadCommand = (fn: (p: string, id: string) => unknown) => (thread: vscode.CommentThread) => {
+    const ref = reviews.hunkOfThread(thread);
+    if (ref) return fn(ref.path, ref.id);
+  };
 
   context.subscriptions.push(
-    statusItem,
-    addedDeco, removedMarkerDeco,
-    vscode.languages.registerCodeLensProvider({ scheme: 'file' }, new HunkCodeLens()),
+    store, reviews, view, status,
+    reviews.onDidChange(() => { updateStatus(); autoOpen(); }),
+    vscode.window.registerWebviewViewProvider(CHANGED_FILES_VIEW, view),
     vscode.workspace.registerTextDocumentContentProvider(BASELINE_SCHEME, {
-      onDidChange: baselineDocEmitter.event,
-      provideTextDocumentContent: uri => baselines.get(key(uri.query))?.content ?? '',
+      provideTextDocumentContent: uri => store.get(uri.query)?.base ?? '',
     }),
-    vscode.workspace.onDidChangeTextDocument(e => { if (baselineFor(e.document)) scheduleRefresh(); }),
-    vscode.window.onDidChangeVisibleTextEditors(scheduleRefresh),
-    vscode.window.tabGroups.onDidChangeTabs(scheduleRefresh),
     vscode.commands.registerCommand('claudeInlineDiff.installHook', () => installHook(context)),
     vscode.commands.registerCommand('claudeInlineDiff.acceptHunk', acceptHunk),
     vscode.commands.registerCommand('claudeInlineDiff.rejectHunk', rejectHunk),
-    vscode.commands.registerCommand('claudeInlineDiff.acceptFile', acceptFile),
-    vscode.commands.registerCommand('claudeInlineDiff.rejectFile', rejectFile),
+    vscode.commands.registerCommand('claudeInlineDiff.acceptThread', threadCommand(acceptHunk)),
+    vscode.commands.registerCommand('claudeInlineDiff.rejectThread', threadCommand(rejectHunk)),
+    vscode.commands.registerCommand('claudeInlineDiff.explainConflict', explainConflict),
+    vscode.commands.registerCommand('claudeInlineDiff.acceptFile', (p?: string) => acceptFile(typeof p === 'string' ? p : undefined)),
+    vscode.commands.registerCommand('claudeInlineDiff.rejectFile', (p?: string) => rejectFile(typeof p === 'string' ? p : undefined)),
+    vscode.commands.registerCommand('claudeInlineDiff.acceptAll', acceptAll),
+    vscode.commands.registerCommand('claudeInlineDiff.rejectAll', rejectAll),
+    vscode.commands.registerCommand('claudeInlineDiff.openChangedFile', openChangedFile),
     vscode.commands.registerCommand('claudeInlineDiff.nextHunk', () => jumpHunk(1)),
     vscode.commands.registerCommand('claudeInlineDiff.prevHunk', () => jumpHunk(-1)),
     vscode.commands.registerCommand('claudeInlineDiff.listFiles', listFiles),
-    vscode.commands.registerCommand('claudeInlineDiff.openReview', openReviewCommand),
+    vscode.commands.registerCommand('claudeInlineDiff.compareFile', compareFile),
+    vscode.commands.registerCommand('claudeInlineDiff.startManualReview', startManualReview),
+    vscode.commands.registerCommand('claudeInlineDiff._debugState', () => ({ reviews: reviews.debugState(), view: view.state() })),
   );
-  refreshAll();
+  reviews.refresh();
+  updateStatus();
 }
 
 export function deactivate() {}
