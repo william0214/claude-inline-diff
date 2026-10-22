@@ -3,14 +3,20 @@ import * as path from 'path';
 import { ReviewManager } from './review';
 import { fileKey } from './session';
 
-export const CHANGED_FILES_VIEW = 'claudeInlineDiff.changedFiles';
-
 // 「已變更 N 個檔案」清單（仿 Copilot Chat 下方的清單）
-// 公開 API 無法把內容加進 Claude Code / Copilot 的聊天視窗，所以做成本擴充套件自己的 Webview View，
-// 使用者可以把它拖到 Claude Code 聊天視窗下方。
+// 公開 API 無法把內容嵌進 Claude Code 的聊天 Webview，所以以 contributes.views 把本擴充套件自己的 Webview View
+// 註冊到 Claude Code 的側邊欄容器中，顯示在 Claude Code 聊天視窗的下方（同一個容器、獨立的 View）。
+// 沒裝 Claude Code 時改顯示在本擴充套件自己的活動列容器。
+export const CHANGED_FILES_VIEWS = [
+  'claudeInlineDiff.changedFiles',
+  'claudeInlineDiff.changedFilesInClaude',
+  'claudeInlineDiff.changedFilesInClaudeLegacy',
+];
+
 export class ChangedFilesView implements vscode.WebviewViewProvider, vscode.Disposable {
-  private view: vscode.WebviewView | undefined;
+  private readonly views = new Set<vscode.WebviewView>();
   private readonly disposables: vscode.Disposable[] = [];
+  private lastCount = 0;
 
   constructor(private readonly reviews: ReviewManager) {
     this.disposables.push(
@@ -20,7 +26,7 @@ export class ChangedFilesView implements vscode.WebviewViewProvider, vscode.Disp
   }
 
   resolveWebviewView(view: vscode.WebviewView) {
-    this.view = view;
+    this.views.add(view);
     view.webview.options = { enableScripts: true };
     view.webview.html = html(view.webview);
     view.webview.onDidReceiveMessage(msg => {
@@ -34,7 +40,12 @@ export class ChangedFilesView implements vscode.WebviewViewProvider, vscode.Disp
       }
     }, undefined, this.disposables);
     view.onDidChangeVisibility(() => { if (view.visible) this.update(); }, undefined, this.disposables);
-    view.onDidDispose(() => { this.view = undefined; }, undefined, this.disposables);
+    view.onDidDispose(() => { this.views.delete(view); }, undefined, this.disposables);
+  }
+
+  // 測試用：目前已顯示的清單 View
+  resolvedViews(): string[] {
+    return [...this.views].map(v => v.viewType);
   }
 
   state() {
@@ -66,12 +77,17 @@ export class ChangedFilesView implements vscode.WebviewViewProvider, vscode.Disp
 
   private update() {
     const state = this.state();
-    if (!this.view) return;
-    this.view.badge = state.files.length
-      ? { value: state.files.length, tooltip: `Claude 已變更 ${state.files.length} 個檔案待審查` }
-      : undefined;
-    this.view.description = state.files.length ? `${state.files.length} 個檔案` : undefined;
-    void this.view.webview.postMessage({ type: 'state', state });
+    const grew = state.files.length > this.lastCount;
+    this.lastCount = state.files.length;
+    for (const view of this.views) {
+      view.badge = state.files.length
+        ? { value: state.files.length, tooltip: `Claude 已變更 ${state.files.length} 個檔案待審查` }
+        : undefined;
+      view.description = state.files.length ? `${state.files.length} 個檔案待審查` : undefined;
+      // 有新的檔案被修改時把清單展開到看得見（不搶走焦點）
+      if (grew && !view.visible) view.show(true);
+      void view.webview.postMessage({ type: 'state', state });
+    }
   }
 
   dispose() {
@@ -91,7 +107,8 @@ function html(webview: vscode.Webview): string {
   body { padding: 0; margin: 0; color: var(--vscode-foreground); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); }
   .box { margin: 8px; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); border-radius: 6px; overflow: hidden; }
   .head { display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: var(--vscode-sideBarSectionHeader-background, transparent); }
-  .head .title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; user-select: none; }
+  .head .title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; user-select: none; }
+  .head button { flex: none; padding: 2px 7px; }
   .add { color: var(--vscode-gitDecoration-addedResourceForeground, #81b88b); }
   .del { color: var(--vscode-gitDecoration-deletedResourceForeground, #c74e39); }
   button { font: inherit; border: 1px solid transparent; border-radius: 3px; padding: 2px 10px; cursor: pointer; }
@@ -107,6 +124,8 @@ function html(webview: vscode.Webview): string {
   .name { white-space: nowrap; }
   .dir { opacity: .65; font-size: 90%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
   .stats { white-space: nowrap; font-family: var(--vscode-editor-font-family); font-size: 90%; }
+  .pending { opacity: .6; font-size: 85%; white-space: nowrap; }
+  li:hover .pending { display: none; }
   .tag { font-size: 85%; padding: 0 5px; border-radius: 8px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); white-space: nowrap; }
   .tag.warn { background: var(--vscode-inputValidation-warningBackground); color: var(--vscode-foreground); }
   .actions { display: none; gap: 2px; }
@@ -155,6 +174,7 @@ function html(webview: vscode.Webview): string {
         + '<span class="name">' + esc(f.name) + '</span>'
         + '<span class="dir">' + esc(f.dir) + '</span>'
         + tags.join('')
+        + '<span class="pending" title="待審查的修改處數">' + f.pending + ' 處</span>'
         + '<span class="stats"><span class="add">+' + f.additions + '</span> <span class="del">-' + f.deletions + '</span></span>'
         + '<span class="actions">'
         + '<button data-act="acceptFile" title="保留此檔案的修改">✓</button>'
@@ -164,8 +184,8 @@ function html(webview: vscode.Webview): string {
     root.innerHTML = '<div class="box ' + (collapsed ? 'collapsed' : '') + '">'
       + '<div class="head"><span class="title" id="toggle"><span class="chev">⌄</span> 已變更 ' + state.files.length + ' 個檔案 '
       + '<span class="add">+' + state.additions + '</span> <span class="del">-' + state.deletions + '</span></span>'
-      + '<button class="primary" data-act="acceptAll" title="保留所有待審查的修改">保留</button>'
-      + '<button class="secondary" data-act="rejectAll" title="復原所有待審查的修改">復原</button></div>'
+      + '<button class="primary" data-act="acceptAll" title="全部保留：保留所有待審查的修改">✓ 保留</button>'
+      + '<button class="secondary" data-act="rejectAll" title="全部復原：復原所有待審查的修改">↶ 復原</button></div>'
       + '<ul>' + rows + '</ul></div>';
   }
 

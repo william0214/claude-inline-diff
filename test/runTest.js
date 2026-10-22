@@ -55,14 +55,31 @@ async function main() {
   // 預設下載一份獨立的 VS Code（快取在 .vscode-test），不動到使用者自己安裝的版本；
   // 要用已安裝的版本測試可設定環境變數 VSCODE_EXE
   const vscodeExecutablePath = process.env.VSCODE_EXE || undefined;
+
+  // 若本機有安裝 Claude Code，只把它（以 junction 連結，不複製）放進測試用的擴充套件資料夾，
+  // 驗證「已變更檔案」清單確實顯示在 Claude Code 側邊欄；其他擴充套件一律不載入
+  const extDir = path.join(os.tmpdir(), 'inline-diff-e2e-ext');
+  fs.rmSync(extDir, { recursive: true, force: true });
+  fs.mkdirSync(extDir, { recursive: true });
+  const userExt = path.join(os.homedir(), '.vscode', 'extensions');
+  const claude = fs.existsSync(userExt)
+    ? fs.readdirSync(userExt).filter(d => d.startsWith('anthropic.claude-code-')).sort().pop()
+    : undefined;
+  if (claude && !process.env.INLINE_DIFF_NO_CLAUDE) {
+    fs.symlinkSync(path.join(userExt, claude), path.join(extDir, claude), 'junction');
+  }
+
   try {
     await runTests({
       vscodeExecutablePath,
       extensionDevelopmentPath: root,
       extensionTestsPath: path.join(__dirname, 'suite.js'),
-      launchArgs: [ws, '--disable-extensions', '--user-data-dir', path.join(os.tmpdir(), 'inline-diff-e2e-user'),
+      launchArgs: [ws, '--extensions-dir', extDir, '--user-data-dir', path.join(os.tmpdir(), 'inline-diff-e2e-user'),
         '--skip-welcome', '--skip-release-notes', '--disable-workspace-trust'],
-      extensionTestsEnv: { INLINE_DIFF_E2E_WS: ws, INLINE_DIFF_E2E_OUT: out, INLINE_DIFF_HOOK: hook },
+      extensionTestsEnv: {
+        INLINE_DIFF_E2E_WS: ws, INLINE_DIFF_E2E_OUT: out, INLINE_DIFF_HOOK: hook,
+        INLINE_DIFF_WITH_CLAUDE: claude && !process.env.INLINE_DIFF_NO_CLAUDE ? '1' : '',
+      },
     });
   } finally {
     clearInterval(timer);

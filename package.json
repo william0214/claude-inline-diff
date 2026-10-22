@@ -1,8 +1,8 @@
 {
   "name": "claude-inline-diff",
   "displayName": "Claude Inline Diff",
-  "description": "在原始檔案編輯器內審查 Claude Code 的修改：新增為綠色、刪除的原始程式碼以紅色區塊顯示，可逐段保留 / 復原，並提供已變更檔案清單（類似 GitHub Copilot）",
-  "version": "0.3.0",
+  "description": "在原始檔案編輯器內審查 Claude Code 的修改：新增綠色、刪除處紅線＋完整內容 hover，逐段保留 / 復原，並在 Claude Code 聊天視窗下方顯示已變更檔案清單（類似 GitHub Copilot）",
+  "version": "0.4.0",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -21,7 +21,8 @@
         {
           "id": "claudeInlineDiff",
           "title": "Claude 修改審查",
-          "icon": "media/review.svg"
+          "icon": "media/review.svg",
+          "when": "!claudeInlineDiff.hasClaudeCode"
         }
       ]
     },
@@ -30,7 +31,24 @@
         {
           "type": "webview",
           "id": "claudeInlineDiff.changedFiles",
-          "name": "已變更檔案"
+          "name": "已變更檔案",
+          "when": "!claudeInlineDiff.hasClaudeCode"
+        }
+      ],
+      "claude-sidebar-secondary": [
+        {
+          "type": "webview",
+          "id": "claudeInlineDiff.changedFilesInClaude",
+          "name": "已變更檔案",
+          "when": "claudeInlineDiff.hasClaudeCode && !claude-code:doesNotSupportSecondarySidebar"
+        }
+      ],
+      "claude-sidebar": [
+        {
+          "type": "webview",
+          "id": "claudeInlineDiff.changedFilesInClaudeLegacy",
+          "name": "已變更檔案",
+          "when": "claudeInlineDiff.hasClaudeCode && claude-code:doesNotSupportSecondarySidebar"
         }
       ]
     },
@@ -78,48 +96,26 @@
         "title": "Claude Inline Diff: 從目前內容開始追蹤此檔案（手動審查模式）"
       },
       {
-        "command": "claudeInlineDiff.acceptThread",
-        "title": "保留",
-        "icon": "$(check)"
-      },
-      {
-        "command": "claudeInlineDiff.rejectThread",
-        "title": "復原",
-        "icon": "$(discard)"
+        "command": "claudeInlineDiff.showDeleted",
+        "title": "Claude Inline Diff: 顯示刪除內容"
       }
     ],
     "menus": {
-      "comments/commentThread/title": [
-        {
-          "command": "claudeInlineDiff.acceptThread",
-          "group": "inline@1",
-          "when": "commentController == claude-inline-diff"
-        },
-        {
-          "command": "claudeInlineDiff.rejectThread",
-          "group": "inline@2",
-          "when": "commentController == claude-inline-diff && commentThread == pending"
-        }
-      ],
       "commandPalette": [
         {
-          "command": "claudeInlineDiff.acceptThread",
-          "when": "false"
-        },
-        {
-          "command": "claudeInlineDiff.rejectThread",
+          "command": "claudeInlineDiff.showDeleted",
           "when": "false"
         }
       ],
       "view/title": [
         {
           "command": "claudeInlineDiff.acceptAll",
-          "when": "view == claudeInlineDiff.changedFiles",
+          "when": "view =~ /^claudeInlineDiff.changedFiles/",
           "group": "navigation@1"
         },
         {
           "command": "claudeInlineDiff.rejectAll",
-          "when": "view == claudeInlineDiff.changedFiles",
+          "when": "view =~ /^claudeInlineDiff.changedFiles/",
           "group": "navigation@2"
         }
       ]
@@ -133,9 +129,6 @@
           "description": "Claude 修改檔案後，自動在編輯器開啟該檔案並定位到修改處（預設關閉，可從「已變更檔案」清單開啟）"
         }
       }
-    },
-    "configurationDefaults": {
-      "comments.openView": "never"
     },
     "keybindings": [
       {

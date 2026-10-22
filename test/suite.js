@@ -104,18 +104,35 @@ async function run() {
       assert.strictEqual(s.additions, 1);
       assert.strictEqual(s.deletions, 6);
     });
-    await step('原始檔案編輯器中顯示：刪除內容區塊、可點的檔案清單', async () => {
+    await step('原始檔案編輯器：精簡 CodeLens、刪除內容在 hover、沒有大型區塊', async () => {
       await exec('claudeInlineDiff.openChangedFile', app);
       const editor = vscode.window.activeTextEditor;
       assert.ok(editor && real(editor.document.uri.fsPath) === real(app), '開啟的是原始檔案');
       assert.ok(!(vscode.window.tabGroups.activeTabGroup.activeTab.input instanceof vscode.TabInputTextDiff), '不是 diff 編輯器');
       const s = await fileState(app);
       assert.strictEqual(editor.selection.active.line, s.hunks[0].curStart, '定位到第一個修改');
-      assert.strictEqual(s.threads.length, 2);
-      assert.ok(s.threads[0].body.includes('快速入口'), '刪除區塊含原始程式碼');
-      assert.ok(s.threads[1].body.includes('我的差勤'), '修改區塊含修改前的行');
-      await exec('workbench.view.extension.claudeInlineDiff');
+      const [del, mod] = s.hunks;
+      assert.ok(del.summary.startsWith('⊖ 已刪除 5 行'), del.summary);
+      assert.ok(del.hover.includes('快速入口') && del.hover.includes('Permissions'), '完整刪除內容');
+      assert.ok(mod.summary.includes('原：') && mod.summary.includes('我的差勤'), mod.summary);
+      const lenses = await vscode.commands.executeCommand('vscode.executeCodeLensProvider', editor.document.uri);
+      const titles = lenses.map(l => l.command && l.command.title);
+      assert.strictEqual(titles.filter(t => t === '✓ 保留').length, 2);
+      assert.strictEqual(titles.filter(t => t === '↶ 復原').length, 2);
+      assert.strictEqual(editor.document.getText(), readNoBom(app), '沒有寫入任何虛擬內容');
+      if (process.env.INLINE_DIFF_WITH_CLAUDE) {
+        await exec('workbench.view.extension.claude-sidebar-secondary');
+        await waitFor(async () => (await state()).resolvedViews.includes('claudeInlineDiff.changedFilesInClaude'),
+          '清單顯示在 Claude Code 側邊欄');
+      } else {
+        await exec('workbench.view.extension.claudeInlineDiff');
+        await waitFor(async () => (await state()).resolvedViews.length > 0, '清單已顯示');
+      }
+      await vscode.window.showTextDocument(editor.document);
       await screenshot('1-appsettings.png');
+      await exec('claudeInlineDiff.showDeleted', app, del.id);
+      await screenshot('2-deleted-hover.png');
+      await exec('editor.action.hideHover').then(undefined, () => undefined);
     });
     await step('Test 4｜保留修改、復原刪除，JSON 結構正確', async () => {
       let s = await fileState(app);
@@ -141,7 +158,7 @@ async function run() {
       assert.strictEqual(s.additions, 3);
       assert.strictEqual(s.deletions, 0);
       assert.strictEqual(s.hunks[0].type, 'add');
-      assert.strictEqual(s.threads.length, 0, '純新增不顯示刪除區塊');
+      assert.strictEqual(s.hunks[0].summary, undefined, '純新增沒有刪除說明');
       await exec('claudeInlineDiff.rejectHunk', f, s.hunks[0].id);
       await waitCleared(f);
       assert.strictEqual(fs.readFileSync(f, 'utf8'), before);
@@ -156,7 +173,7 @@ async function run() {
       const s = await waitFile(f, s => s && s.hunks.length === 1, '刪除 hunk');
       assert.strictEqual(s.hunks[0].type, 'delete');
       assert.strictEqual(s.deletions, 4);
-      assert.ok(s.threads[0].body.includes('"A"'), '刪除區塊顯示被刪的物件');
+      assert.ok(s.hunks[0].hover.includes('"A"'), 'hover 顯示被刪的物件');
       await exec('claudeInlineDiff.rejectHunk', f, s.hunks[0].id);
       await waitCleared(f);
       assert.strictEqual(fs.readFileSync(f, 'utf8'), before);
@@ -211,7 +228,7 @@ async function run() {
       const tabs = vscode.window.tabGroups.all.flatMap(g => g.tabs)
         .filter(t => t.input instanceof vscode.TabInputText && real(t.input.uri.fsPath) === real(files[0]));
       assert.strictEqual(tabs.length, 1);
-      await screenshot('2-changed-files.png');
+      await screenshot('3-changed-files.png');
       await exec('claudeInlineDiff.rejectAll', { confirm: false });
       for (const [i, f] of files.entries()) {
         await waitCleared(f);

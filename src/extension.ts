@@ -6,7 +6,7 @@ import {
   SessionStore, FileSession, ReviewHunk, acceptInSession, rejectInSession, isSettled, currentText, openDocument,
 } from './session';
 import { ReviewManager } from './review';
-import { ChangedFilesView, CHANGED_FILES_VIEW } from './changedFiles';
+import { ChangedFilesView, CHANGED_FILES_VIEWS } from './changedFiles';
 
 const HOOK_SCRIPT = 'inline-diff-snapshot.js';
 const BASELINE_SCHEME = 'claude-inline-diff-base';
@@ -192,6 +192,19 @@ function reveal(editor: vscode.TextEditor, h: ReviewHunk) {
   editor.revealRange(new vscode.Range(top, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 }
 
+// 在刪除標示處開啟 hover，顯示完整的刪除 / 修改前內容
+async function showDeleted(filePath: string, id: string) {
+  const h = reviews.findHunk(filePath, id);
+  if (!h) return staleNotice();
+  const doc = openDocument(filePath) ?? await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
+  const editor = await vscode.window.showTextDocument(doc, { preview: false });
+  const line = reviews.markerLine(h, doc.lineCount);
+  const pos = new vscode.Position(line, 0);
+  editor.selection = new vscode.Selection(pos, pos);
+  editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+  await vscode.commands.executeCommand('editor.action.showHover');
+}
+
 function jumpHunk(dir: 1 | -1) {
   const editor = vscode.window.activeTextEditor;
   const hunks = editor && reviews.review(editor.document.uri.fsPath)?.hunks;
@@ -291,6 +304,9 @@ function autoOpen() {
 }
 
 export function activate(context: vscode.ExtensionContext) {
+  // 有裝 Claude Code 時，清單顯示在 Claude Code 側邊欄（聊天視窗下方）；否則顯示在本擴充套件自己的容器
+  void vscode.commands.executeCommand('setContext', 'claudeInlineDiff.hasClaudeCode',
+    !!vscode.extensions.getExtension('anthropic.claude-code'));
   store = new SessionStore();
   reviews = new ReviewManager(store);
   const view = new ChangedFilesView(reviews);
@@ -303,23 +319,17 @@ export function activate(context: vscode.ExtensionContext) {
     if (n) status.show(); else status.hide();
   };
 
-  const threadCommand = (fn: (p: string, id: string) => unknown) => (thread: vscode.CommentThread) => {
-    const ref = reviews.hunkOfThread(thread);
-    if (ref) return fn(ref.path, ref.id);
-  };
-
   context.subscriptions.push(
     store, reviews, view, status,
     reviews.onDidChange(() => { updateStatus(); autoOpen(); }),
-    vscode.window.registerWebviewViewProvider(CHANGED_FILES_VIEW, view),
+    ...CHANGED_FILES_VIEWS.map(id => vscode.window.registerWebviewViewProvider(id, view)),
     vscode.workspace.registerTextDocumentContentProvider(BASELINE_SCHEME, {
       provideTextDocumentContent: uri => store.get(uri.query)?.base ?? '',
     }),
     vscode.commands.registerCommand('claudeInlineDiff.installHook', () => installHook(context)),
     vscode.commands.registerCommand('claudeInlineDiff.acceptHunk', acceptHunk),
     vscode.commands.registerCommand('claudeInlineDiff.rejectHunk', rejectHunk),
-    vscode.commands.registerCommand('claudeInlineDiff.acceptThread', threadCommand(acceptHunk)),
-    vscode.commands.registerCommand('claudeInlineDiff.rejectThread', threadCommand(rejectHunk)),
+    vscode.commands.registerCommand('claudeInlineDiff.showDeleted', showDeleted),
     vscode.commands.registerCommand('claudeInlineDiff.explainConflict', explainConflict),
     vscode.commands.registerCommand('claudeInlineDiff.acceptFile', (p?: string) => acceptFile(typeof p === 'string' ? p : undefined)),
     vscode.commands.registerCommand('claudeInlineDiff.rejectFile', (p?: string) => rejectFile(typeof p === 'string' ? p : undefined)),
@@ -331,7 +341,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('claudeInlineDiff.listFiles', listFiles),
     vscode.commands.registerCommand('claudeInlineDiff.compareFile', compareFile),
     vscode.commands.registerCommand('claudeInlineDiff.startManualReview', startManualReview),
-    vscode.commands.registerCommand('claudeInlineDiff._debugState', () => ({ reviews: reviews.debugState(), view: view.state() })),
+    vscode.commands.registerCommand('claudeInlineDiff._debugState', () => ({ reviews: reviews.debugState(), view: view.state(), resolvedViews: view.resolvedViews() })),
   );
   reviews.refresh();
   updateStatus();
