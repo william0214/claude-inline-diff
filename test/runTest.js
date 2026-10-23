@@ -44,8 +44,13 @@ async function main() {
     const name = fs.readFileSync(req, 'utf8');
     fs.unlinkSync(req);
     try {
-      cp.execFileSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-        path.join(__dirname, 'screenshot.ps1'), '-Title', path.basename(ws), '-Out', path.join(out, name)]);
+      if (process.platform === 'darwin') {
+        cp.execFileSync('osascript', ['-l', 'JavaScript',
+          path.join(__dirname, 'screenshot-mac.js'), path.basename(ws), path.join(out, name)]);
+      } else {
+        cp.execFileSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+          path.join(__dirname, 'screenshot.ps1'), '-Title', path.basename(ws), '-Out', path.join(out, name)]);
+      }
     } catch (e) {
       console.error('截圖失敗：', String(e.stderr || e));
     }
