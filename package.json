@@ -1,10 +1,20 @@
 {
-  "name": "claude-inline-diff",
-  "displayName": "Claude Inline Diff",
-  "description": "在原始檔案編輯器內審查 Claude Code 的修改：新增綠色、刪除處紅線＋完整內容 hover，逐段保留 / 復原，並在 Claude Code 聊天視窗下方顯示已變更檔案清單（類似 GitHub Copilot）",
+  "name": "inline-diff-review",
+  "displayName": "Inline Diff Review for Claude Code",
+  "description": "以 diff 編輯器（左右並排／上下排）或行內紅綠標示審查 Claude Code 的修改，逐段保留 / 復原，並在聊天視窗下方列出已變更檔案（類似 GitHub Copilot）",
   "version": "0.5.0",
-  "publisher": "local",
+  "publisher": "william0214",
   "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/william0214/claude-inline-diff.git"
+  },
+  "bugs": {
+    "url": "https://github.com/william0214/claude-inline-diff/issues"
+  },
+  "homepage": "https://github.com/william0214/claude-inline-diff#readme",
+  "keywords": ["claude", "claude code", "diff", "review", "copilot", "inline diff"],
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -55,56 +65,56 @@
     "commands": [
       {
         "command": "claudeInlineDiff.installHook",
-        "title": "Claude Inline Diff: 安裝 Claude Code hook 到此工作區"
+        "title": "Inline Diff: 安裝 Claude Code hook 到此工作區"
       },
       {
         "command": "claudeInlineDiff.acceptFile",
-        "title": "Claude Inline Diff: 保留此檔案全部修改",
+        "title": "Inline Diff: 保留此檔案全部修改",
         "icon": "$(check)"
       },
       {
         "command": "claudeInlineDiff.rejectFile",
-        "title": "Claude Inline Diff: 復原此檔案全部修改",
+        "title": "Inline Diff: 復原此檔案全部修改",
         "icon": "$(discard)"
       },
       {
         "command": "claudeInlineDiff.acceptAll",
-        "title": "Claude Inline Diff: 保留所有檔案的修改",
+        "title": "Inline Diff: 保留所有檔案的修改",
         "icon": "$(check-all)"
       },
       {
         "command": "claudeInlineDiff.rejectAll",
-        "title": "Claude Inline Diff: 復原所有檔案的修改",
+        "title": "Inline Diff: 復原所有檔案的修改",
         "icon": "$(discard)"
       },
       {
         "command": "claudeInlineDiff.nextHunk",
-        "title": "Claude Inline Diff: 下一處修改"
+        "title": "Inline Diff: 下一處修改"
       },
       {
         "command": "claudeInlineDiff.prevHunk",
-        "title": "Claude Inline Diff: 上一處修改"
+        "title": "Inline Diff: 上一處修改"
       },
       {
         "command": "claudeInlineDiff.listFiles",
-        "title": "Claude Inline Diff: 列出所有待審查檔案"
+        "title": "Inline Diff: 列出所有待審查檔案"
       },
       {
         "command": "claudeInlineDiff.compareFile",
-        "title": "Claude Inline Diff: 以 diff 編輯器審查此檔案"
+        "title": "Inline Diff: 以 diff 編輯器審查此檔案"
       },
       {
         "command": "claudeInlineDiff.toggleLayout",
-        "title": "Claude Inline Diff: 切換左右並排 / 上下排",
+        "title": "Inline Diff: 切換左右並排 / 上下排",
         "icon": "$(split-horizontal)"
       },
       {
         "command": "claudeInlineDiff.startManualReview",
-        "title": "Claude Inline Diff: 從目前內容開始追蹤此檔案（手動審查模式）"
+        "title": "Inline Diff: 從目前內容開始追蹤此檔案（手動審查模式）"
       },
       {
         "command": "claudeInlineDiff.showDeleted",
-        "title": "Claude Inline Diff: 顯示刪除內容"
+        "title": "Inline Diff: 顯示刪除內容"
       }
     ],
     "menus": {
@@ -145,7 +155,7 @@
       ]
     },
     "configuration": {
-      "title": "Claude Inline Diff",
+      "title": "Inline Diff Review",
       "properties": {
         "claudeInlineDiff.reviewMode": {
           "type": "string",
@@ -198,7 +208,7 @@
   "scripts": {
     "compile": "tsc -p .",
     "watch": "tsc -watch -p .",
-    "package": "vsce package --no-dependencies --allow-missing-repository --skip-license",
+    "package": "vsce package --no-dependencies",
     "test": "npm run compile && node test/runTest.js"
   },
   "devDependencies": {

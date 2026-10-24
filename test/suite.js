@@ -93,7 +93,7 @@ const exec = (cmd, ...args) => vscode.commands.executeCommand(cmd, ...args);
 
 async function run() {
   try {
-    await vscode.extensions.getExtension('local.claude-inline-diff').activate();
+    await vscode.extensions.getExtension('william0214.inline-diff-review').activate();
     const fixture = readNoBom(path.join(__dirname, 'fixtures', 'appsettings.json'));
 
     // ---- Test 0 + 4：重新載入後恢復；參考圖片的 appsettings.json（刪除 + 修改） ----
