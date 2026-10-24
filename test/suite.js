@@ -134,6 +134,53 @@ async function run() {
       await screenshot('2-deleted-hover.png');
       await exec('editor.action.hideHover').then(undefined, () => undefined);
     });
+    await step('diff 編輯器模式：左右並排與上下排、左側只含 Claude 的修改、保留／復原按鈕', async () => {
+      const cfg = () => vscode.workspace.getConfiguration('claudeInlineDiff');
+      await cfg().update('reviewMode', 'diff', vscode.ConfigurationTarget.Workspace);
+      try {
+        assert.strictEqual(vscode.workspace.getConfiguration('diffEditor').get('codeLens'), true, 'diff 編輯器顯示 CodeLens');
+        await exec('claudeInlineDiff.openChangedFile', app);
+        const tab = await waitFor(() => {
+          const t = vscode.window.tabGroups.activeTabGroup.activeTab;
+          return t && t.input instanceof vscode.TabInputTextDiff && t;
+        }, '開啟 diff 編輯器');
+        assert.strictEqual(tab.input.original.scheme, 'claude-inline-diff-base');
+        assert.strictEqual(real(tab.input.modified.fsPath), real(app), '右側是原始檔案');
+        const left = await vscode.workspace.openTextDocument(tab.input.original);
+        assert.strictEqual(left.getText(), fixture, '左側＝Claude 修改前');
+        const editor = vscode.window.activeTextEditor;
+        const s = await fileState(app);
+        assert.ok(editor && real(editor.document.uri.fsPath) === real(app));
+        assert.strictEqual(editor.selection.active.line, s.hunks[0].curStart, '定位到第一個修改');
+        const lenses = await vscode.commands.executeCommand('vscode.executeCodeLensProvider', editor.document.uri);
+        assert.strictEqual(lenses.filter(l => l.command && l.command.title === '✓ 保留').length, 2);
+
+        const sideBySide = () => vscode.workspace.getConfiguration('diffEditor').get('renderSideBySide');
+        const limited = () => vscode.workspace.getConfiguration('diffEditor').get('useInlineViewWhenSpaceIsLimited');
+        // 從 VS Code 預設值開始（測試用的使用者設定會沿用上一輪）
+        const resetDiffLayout = async () => {
+          for (const k of ['renderSideBySide', 'useInlineViewWhenSpaceIsLimited']) {
+            await vscode.workspace.getConfiguration('diffEditor').update(k, undefined, vscode.ConfigurationTarget.Global);
+          }
+        };
+        await resetDiffLayout();
+        await exec('claudeInlineDiff.toggleLayout');
+        await waitFor(() => sideBySide() === true && limited() === false, '左右並排（空間不足也不自動改上下排）');
+        await screenshot('4-diff-side-by-side.png');
+        const eds = (await state()).editors;
+        const diffSide = eds.find(e => e.uri.startsWith('file:') && e.inDiff);
+        assert.ok(diffSide, '偵測到 diff 編輯器內的原始檔案：' + JSON.stringify(eds));
+        await exec('claudeInlineDiff.toggleLayout');
+        await waitFor(() => sideBySide() === false, '上下排');
+        await screenshot('5-diff-inline.png');
+        await exec('claudeInlineDiff.toggleLayout');
+        await waitFor(() => sideBySide() === true, '切回左右並排');
+        await resetDiffLayout();
+        await exec('workbench.action.closeActiveEditor');
+      } finally {
+        await cfg().update('reviewMode', 'inline', vscode.ConfigurationTarget.Workspace);
+      }
+    });
     await step('Test 4｜保留修改、復原刪除，JSON 結構正確', async () => {
       let s = await fileState(app);
       await exec('claudeInlineDiff.acceptHunk', app, s.hunks.find(h => h.type === 'modify').id);

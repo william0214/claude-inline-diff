@@ -24,6 +24,8 @@ async function main() {
   fs.writeFileSync(path.join(ws, '.vscode', 'settings.json'), JSON.stringify({
     'workbench.startupEditor': 'none',
     'security.workspace.trust.enabled': false,
+    // Test 1–10 驗證原始檔案內的行內標示；diff 編輯器模式由專門的步驟切換測試
+    'claudeInlineDiff.reviewMode': 'inline',
   }));
 
   // VS Code 啟動前 Claude 已改過檔案（模擬 Reload 後恢復）：參考圖片的 appsettings.json，

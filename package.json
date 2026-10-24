@@ -2,7 +2,7 @@
   "name": "claude-inline-diff",
   "displayName": "Claude Inline Diff",
   "description": "在原始檔案編輯器內審查 Claude Code 的修改：新增綠色、刪除處紅線＋完整內容 hover，逐段保留 / 復原，並在 Claude Code 聊天視窗下方顯示已變更檔案清單（類似 GitHub Copilot）",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "local",
   "license": "MIT",
   "engines": {
@@ -59,11 +59,13 @@
       },
       {
         "command": "claudeInlineDiff.acceptFile",
-        "title": "Claude Inline Diff: 保留此檔案全部修改"
+        "title": "Claude Inline Diff: 保留此檔案全部修改",
+        "icon": "$(check)"
       },
       {
         "command": "claudeInlineDiff.rejectFile",
-        "title": "Claude Inline Diff: 復原此檔案全部修改"
+        "title": "Claude Inline Diff: 復原此檔案全部修改",
+        "icon": "$(discard)"
       },
       {
         "command": "claudeInlineDiff.acceptAll",
@@ -89,7 +91,12 @@
       },
       {
         "command": "claudeInlineDiff.compareFile",
-        "title": "Claude Inline Diff: 以 diff 檢視比對此檔案"
+        "title": "Claude Inline Diff: 以 diff 編輯器審查此檔案"
+      },
+      {
+        "command": "claudeInlineDiff.toggleLayout",
+        "title": "Claude Inline Diff: 切換左右並排 / 上下排",
+        "icon": "$(split-horizontal)"
       },
       {
         "command": "claudeInlineDiff.startManualReview",
@@ -105,6 +112,23 @@
         {
           "command": "claudeInlineDiff.showDeleted",
           "when": "false"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "claudeInlineDiff.toggleLayout",
+          "when": "claudeInlineDiff.inReviewDiff",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeInlineDiff.acceptFile",
+          "when": "claudeInlineDiff.inReviewDiff",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeInlineDiff.rejectFile",
+          "when": "claudeInlineDiff.inReviewDiff",
+          "group": "navigation@3"
         }
       ],
       "view/title": [
@@ -123,12 +147,28 @@
     "configuration": {
       "title": "Claude Inline Diff",
       "properties": {
+        "claudeInlineDiff.reviewMode": {
+          "type": "string",
+          "enum": [
+            "diff",
+            "inline"
+          ],
+          "enumDescriptions": [
+            "以 VS Code diff 編輯器審查：左右並排或上下排（刪除的行顯示成紅色列，類似 GitHub Copilot）",
+            "直接在原始檔案中以紅綠標示審查（刪除內容以紅線＋hover 顯示）"
+          ],
+          "default": "diff",
+          "description": "從「已變更檔案」清單開啟檔案時的審查方式"
+        },
         "claudeInlineDiff.autoOpen": {
           "type": "boolean",
           "default": false,
           "description": "Claude 修改檔案後，自動在編輯器開啟該檔案並定位到修改處（預設關閉，可從「已變更檔案」清單開啟）"
         }
       }
+    },
+    "configurationDefaults": {
+      "diffEditor.codeLens": true
     },
     "keybindings": [
       {

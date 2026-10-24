@@ -1,11 +1,11 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { stripBom } from './diff';
+import { stripBom, splitLines, eolOf } from './diff';
 import {
   SessionStore, FileSession, ReviewHunk, acceptInSession, rejectInSession, isSettled, currentText, openDocument,
 } from './session';
-import { ReviewManager } from './review';
+import { ReviewManager, inDiffEditor } from './review';
 import { ChangedFilesView, CHANGED_FILES_VIEWS } from './changedFiles';
 
 const HOOK_SCRIPT = 'inline-diff-snapshot.js';
@@ -13,6 +13,7 @@ const BASELINE_SCHEME = 'claude-inline-diff-base';
 
 let store: SessionStore;
 let reviews: ReviewManager;
+const baseChanged = new vscode.EventEmitter<vscode.Uri>();
 
 // ---------- 文件編輯 ----------
 
@@ -164,8 +165,19 @@ async function rejectAll(opts: { confirm?: boolean } = {}) {
 // ---------- 開檔與導覽 ----------
 
 function activePath(): string | undefined {
-  const uri = vscode.window.activeTextEditor?.document.uri;
-  return uri?.scheme === 'file' ? uri.fsPath : undefined;
+  return pathOf(vscode.window.activeTextEditor?.document.uri);
+}
+
+// 指令參數可能是檔案路徑，或編輯器標題列按鈕傳入的 Uri（diff 左側是修改前的虛擬文件）
+function pathOf(arg: unknown): string | undefined {
+  if (typeof arg === 'string') return arg;
+  if (!(arg instanceof vscode.Uri)) return undefined;
+  if (arg.scheme === BASELINE_SCHEME) return arg.query;
+  return arg.scheme === 'file' ? arg.fsPath : undefined;
+}
+
+function reviewMode(): 'diff' | 'inline' {
+  return vscode.workspace.getConfiguration('claudeInlineDiff').get('reviewMode', 'diff');
 }
 
 // 開啟原始檔案（已開啟就切過去，不重複開分頁）並定位到第一個待審查的修改
@@ -177,6 +189,7 @@ async function openChangedFile(filePath: string) {
     if (pick === '確認刪除') await acceptFile(filePath);
     return;
   }
+  if (reviewMode() === 'diff') return openDiff(filePath);
   const doc = openDocument(filePath) ?? await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
   const editor = await vscode.window.showTextDocument(doc, { preview: false });
   const first = reviews.review(filePath)?.hunks.find(h => h.status === 'pending') ?? reviews.review(filePath)?.hunks[0];
@@ -231,12 +244,58 @@ async function listFiles() {
   if (pick) await openChangedFile(pick.path);
 }
 
-// 輔助：以 VS Code diff 檢視比對修改前與目前內容
-async function compareFile(filePath?: string) {
+// ---------- diff 編輯器審查 ----------
+
+function baseUri(p: string): vscode.Uri {
+  return vscode.Uri.from({ scheme: BASELINE_SCHEME, path: vscode.Uri.file(p).path, query: p });
+}
+
+// diff 左側：把目前內容中待審查的 AI 修改還原回去（＝全部復原後的樣子），所以只會比出 Claude 的修改、不含手動修改
+function reviewBaseText(p: string): string {
+  const s = store.get(p);
+  const review = reviews.review(p);
+  if (!s || !review || review.missing) return s?.base ?? '';
+  const cur = stripBom(currentText(p) ?? '');
+  const lines = splitLines(cur);
+  const pending = review.hunks.filter(h => h.status === 'pending').sort((a, b) => b.curStart - a.curStart);
+  for (const h of pending) lines.splice(h.curStart, h.added.length, ...h.removed);
+  return lines.join(eolOf(cur));
+}
+
+// 以 VS Code 內建 diff 編輯器審查：左邊修改前、右邊原始檔案（可直接編輯）；
+// 左右並排 / 上下排（刪除的行是真正的紅色列，類似 Copilot）可用標題列按鈕切換
+async function openDiff(filePath?: string) {
   const p = filePath ?? activePath();
   if (!p || !store.get(p)) return;
-  const base = vscode.Uri.from({ scheme: BASELINE_SCHEME, path: vscode.Uri.file(p).path, query: p });
-  await vscode.commands.executeCommand('vscode.diff', base, vscode.Uri.file(p), `${path.basename(p)}（Claude 修改前 ↔ 目前）`);
+  await vscode.commands.executeCommand('vscode.diff', baseUri(p), vscode.Uri.file(p),
+    `${path.basename(p)}（Claude 修改審查）`, { preview: false });
+  const editor = vscode.window.activeTextEditor;
+  const first = reviews.review(p)?.hunks.find(h => h.status === 'pending') ?? reviews.review(p)?.hunks[0];
+  if (editor?.document.uri.scheme === 'file' && first) reveal(editor, first);
+}
+
+// 切換左右並排 / 上下排。切到左右並排時一併關掉「空間不足自動改上下排」，否則編輯器較窄時按了看起來沒反應
+async function toggleLayout() {
+  const cfg = vscode.workspace.getConfiguration('diffEditor');
+  const toSideBySide = !cfg.get('renderSideBySide', true) || cfg.get('useInlineViewWhenSpaceIsLimited', true);
+  if (toSideBySide) await cfg.update('useInlineViewWhenSpaceIsLimited', false, vscode.ConfigurationTarget.Global);
+  await cfg.update('renderSideBySide', toSideBySide, vscode.ConfigurationTarget.Global);
+}
+
+function isReviewDiff(tab: vscode.Tab | undefined): boolean {
+  return tab?.input instanceof vscode.TabInputTextDiff && tab.input.original.scheme === BASELINE_SCHEME;
+}
+
+function updateDiffContext() {
+  void vscode.commands.executeCommand('setContext', 'claudeInlineDiff.inReviewDiff',
+    isReviewDiff(vscode.window.tabGroups.activeTabGroup.activeTab));
+}
+
+// 審查狀態變了，已開啟的 diff 左側要跟著更新
+function refreshBaseDocs() {
+  for (const doc of vscode.workspace.textDocuments) {
+    if (doc.uri.scheme === BASELINE_SCHEME) baseChanged.fire(doc.uri);
+  }
 }
 
 async function startManualReview() {
@@ -321,30 +380,39 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     store, reviews, view, status,
-    reviews.onDidChange(() => { updateStatus(); autoOpen(); }),
+    baseChanged,
+    reviews.onDidChange(() => { updateStatus(); autoOpen(); refreshBaseDocs(); }),
+    vscode.window.tabGroups.onDidChangeTabs(updateDiffContext),
+    vscode.window.tabGroups.onDidChangeTabGroups(updateDiffContext),
     ...CHANGED_FILES_VIEWS.map(id => vscode.window.registerWebviewViewProvider(id, view)),
     vscode.workspace.registerTextDocumentContentProvider(BASELINE_SCHEME, {
-      provideTextDocumentContent: uri => store.get(uri.query)?.base ?? '',
+      onDidChange: baseChanged.event,
+      provideTextDocumentContent: uri => reviewBaseText(uri.query),
     }),
     vscode.commands.registerCommand('claudeInlineDiff.installHook', () => installHook(context)),
     vscode.commands.registerCommand('claudeInlineDiff.acceptHunk', acceptHunk),
     vscode.commands.registerCommand('claudeInlineDiff.rejectHunk', rejectHunk),
     vscode.commands.registerCommand('claudeInlineDiff.showDeleted', showDeleted),
     vscode.commands.registerCommand('claudeInlineDiff.explainConflict', explainConflict),
-    vscode.commands.registerCommand('claudeInlineDiff.acceptFile', (p?: string) => acceptFile(typeof p === 'string' ? p : undefined)),
-    vscode.commands.registerCommand('claudeInlineDiff.rejectFile', (p?: string) => rejectFile(typeof p === 'string' ? p : undefined)),
+    vscode.commands.registerCommand('claudeInlineDiff.acceptFile', (p?: unknown) => acceptFile(pathOf(p))),
+    vscode.commands.registerCommand('claudeInlineDiff.rejectFile', (p?: unknown) => rejectFile(pathOf(p))),
     vscode.commands.registerCommand('claudeInlineDiff.acceptAll', acceptAll),
     vscode.commands.registerCommand('claudeInlineDiff.rejectAll', rejectAll),
     vscode.commands.registerCommand('claudeInlineDiff.openChangedFile', openChangedFile),
     vscode.commands.registerCommand('claudeInlineDiff.nextHunk', () => jumpHunk(1)),
     vscode.commands.registerCommand('claudeInlineDiff.prevHunk', () => jumpHunk(-1)),
     vscode.commands.registerCommand('claudeInlineDiff.listFiles', listFiles),
-    vscode.commands.registerCommand('claudeInlineDiff.compareFile', compareFile),
+    vscode.commands.registerCommand('claudeInlineDiff.compareFile', (p?: unknown) => openDiff(pathOf(p))),
+    vscode.commands.registerCommand('claudeInlineDiff.toggleLayout', toggleLayout),
     vscode.commands.registerCommand('claudeInlineDiff.startManualReview', startManualReview),
-    vscode.commands.registerCommand('claudeInlineDiff._debugState', () => ({ reviews: reviews.debugState(), view: view.state(), resolvedViews: view.resolvedViews() })),
+    vscode.commands.registerCommand('claudeInlineDiff._debugState', () => ({
+      reviews: reviews.debugState(), view: view.state(), resolvedViews: view.resolvedViews(),
+      editors: vscode.window.visibleTextEditors.map(e => ({ uri: e.document.uri.toString(), viewColumn: e.viewColumn, inDiff: inDiffEditor(e) })),
+    })),
   );
   reviews.refresh();
   updateStatus();
+  updateDiffContext();
 }
 
 export function deactivate() {}

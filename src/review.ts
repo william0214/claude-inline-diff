@@ -65,6 +65,7 @@ export class ReviewManager implements vscode.Disposable {
         if (e.document.uri.scheme === 'file' && store.get(e.document.uri.fsPath)) this.schedule();
       }),
       vscode.window.onDidChangeVisibleTextEditors(() => this.renderEditors()),
+      vscode.window.tabGroups.onDidChangeTabs(() => this.renderEditors()),
       vscode.languages.registerCodeLensProvider({ scheme: 'file' }, {
         onDidChangeCodeLenses: this.codeLensEmitter.event,
         provideCodeLenses: doc => this.codeLenses(doc),
@@ -129,7 +130,8 @@ export class ReviewManager implements vscode.Disposable {
 
   private renderEditor(editor: vscode.TextEditor) {
     const doc = editor.document;
-    const review = doc.uri.scheme === 'file' ? this.review(doc.uri.fsPath) : undefined;
+    // diff 編輯器自己會畫紅綠，裡面的原始檔案不再疊加行內標示（CodeLens 仍保留）
+    const review = doc.uri.scheme === 'file' && !inDiffEditor(editor) ? this.review(doc.uri.fsPath) : undefined;
     const added: vscode.DecorationOptions[] = [];
     const chars: vscode.DecorationOptions[] = [];
     const above: vscode.DecorationOptions[] = [];
@@ -226,6 +228,16 @@ export class ReviewManager implements vscode.Disposable {
     if (this.timer) clearTimeout(this.timer);
     for (const d of this.disposables) d.dispose();
   }
+}
+
+// diff 編輯器兩側的 TextEditor 沒有 viewColumn；再比對目前顯示中的 diff 分頁，確認右側就是這個檔案
+export function inDiffEditor(editor: vscode.TextEditor): boolean {
+  if (editor.viewColumn !== undefined) return false;
+  const uri = editor.document.uri.toString();
+  return vscode.window.tabGroups.all.some(g => {
+    const input = g.activeTab?.input;
+    return input instanceof vscode.TabInputTextDiff && input.modified.toString() === uri;
+  });
 }
 
 function shorten(s: string, n: number): string {
