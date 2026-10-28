@@ -81,7 +81,7 @@ export class ChangedFilesView implements vscode.WebviewViewProvider, vscode.Disp
     this.lastCount = state.files.length;
     for (const view of this.views) {
       view.badge = state.files.length
-        ? { value: state.files.length, tooltip: `Claude 已變更 ${state.files.length} 個檔案待審查` }
+        ? { value: state.files.length, tooltip: `已變更 ${state.files.length} 個檔案待審查` }
         : undefined;
       view.description = state.files.length ? `${state.files.length} 個檔案待審查` : undefined;
       // 有新的檔案被修改時把清單展開到看得見（不搶走焦點）
@@ -161,14 +161,14 @@ function html(webview: vscode.Webview): string {
 
   function render(state) {
     if (!state.files.length) {
-      root.innerHTML = '<div class="empty">沒有待審查的 Claude 修改。</div>';
+      root.innerHTML = '<div class="empty">沒有待審查的修改。</div>';
       return;
     }
     const rows = state.files.map(f => {
       const tags = [];
       if (f.missing) tags.push('<span class="tag warn">已刪除</span>');
       else if (f.isNew) tags.push('<span class="tag">新檔案</span>');
-      if (f.conflicted) tags.push('<span class="tag warn" title="有 ' + f.conflicted + ' 處在 Claude 修改後又被手動編輯">衝突 ' + f.conflicted + '</span>');
+      if (f.conflicted) tags.push('<span class="tag warn" title="有 ' + f.conflicted + ' 處在修改後又被手動編輯">衝突 ' + f.conflicted + '</span>');
       return '<li class="' + (f.active ? 'active' : '') + '" data-path="' + esc(f.path) + '" title="' + esc(f.relative) + '\\n待審查 ' + f.pending + ' 處">'
         + icon(f.name)
         + '<span class="name">' + esc(f.name) + '</span>'

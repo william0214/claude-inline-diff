@@ -83,7 +83,7 @@ function staleNotice() {
 }
 
 function explainConflict() {
-  vscode.window.showWarningMessage('這段 Claude 的修改之後又被手動編輯過，為避免覆蓋你的修改，無法自動復原。可以選擇保留，或手動調整後再保留。');
+  vscode.window.showWarningMessage('這段修改之後又被手動編輯過，為避免覆蓋你的修改，無法自動復原。可以選擇保留，或手動調整後再保留。');
 }
 
 // ---------- 整個檔案 / 整個 Session ----------
@@ -129,7 +129,7 @@ async function rejectFile(filePath?: string, opts: { quiet?: boolean } = {}): Pr
   if (!s.existed && conflicted === 0 && doc.getText().trim() === '') {
     // Claude 新建的檔案全部復原後是空的：詢問是否刪除檔案
     const ok = opts.quiet ? '保留空檔案' : await vscode.window.showWarningMessage(
-      `${path.basename(s.path)} 是 Claude 新建的檔案，已復原為空白。要移到資源回收筒嗎？`, '移除檔案', '保留空檔案');
+      `${path.basename(s.path)} 是 AI 新建的檔案，已復原為空白。要移到資源回收筒嗎？`, '移除檔案', '保留空檔案');
     if (ok === '移除檔案') {
       store.clear(s);
       await vscode.workspace.fs.delete(doc.uri, { useTrash: true });
@@ -154,7 +154,7 @@ async function rejectAll(opts: { confirm?: boolean } = {}) {
   if (!files.length) return;
   if (opts.confirm !== false) {
     const ok = await vscode.window.showWarningMessage(
-      `要復原 Claude 在 ${files.length} 個檔案中的所有待審查修改嗎？（之後被手動編輯過的區塊會略過）`, { modal: true }, '全部復原');
+      `要復原 ${files.length} 個檔案中的所有待審查修改嗎？（之後被手動編輯過的區塊會略過）`, { modal: true }, '全部復原');
     if (ok !== '全部復原') return;
   }
   let conflicted = 0;
@@ -237,7 +237,7 @@ async function listFiles() {
     path: r.session.path,
   }));
   if (!items.length) {
-    vscode.window.showInformationMessage('目前沒有待審查的 Claude 修改。');
+    vscode.window.showInformationMessage('目前沒有待審查的修改。');
     return;
   }
   const pick = await vscode.window.showQuickPick(items, { placeHolder: '選擇要審查的檔案' });
@@ -268,7 +268,7 @@ async function openDiff(filePath?: string) {
   const p = filePath ?? activePath();
   if (!p || !store.get(p)) return;
   await vscode.commands.executeCommand('vscode.diff', baseUri(p), vscode.Uri.file(p),
-    `${path.basename(p)}（Claude 修改審查）`, { preview: false });
+    path.basename(p), { preview: false });
   const editor = vscode.window.activeTextEditor;
   const first = reviews.review(p)?.hunks.find(h => h.status === 'pending') ?? reviews.review(p)?.hunks[0];
   if (editor?.document.uri.scheme === 'file' && first) reveal(editor, first);
@@ -374,7 +374,7 @@ export function activate(context: vscode.ExtensionContext) {
   status.command = 'claudeInlineDiff.listFiles';
   const updateStatus = () => {
     const n = reviews.reviews().length;
-    status.text = `$(diff) Claude：${n} 個檔案待審查`;
+    status.text = `$(diff) ${n} 個檔案待審查`;
     if (n) status.show(); else status.hide();
   };
 

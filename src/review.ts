@@ -144,7 +144,7 @@ export class ReviewManager implements vscode.Disposable {
       if (h.status === 'conflicted') {
         conflicts.push(...(lines.length ? lines : [Math.min(h.curStart, last)]).map(l => ({
           range: doc.lineAt(l).range,
-          hoverMessage: '這段 Claude 的修改之後又被手動編輯過，無法安全地自動復原；可以保留，或手動處理。',
+          hoverMessage: '這段修改之後又被手動編輯過，無法安全地自動復原；可以保留，或手動處理。',
         })));
         continue;
       }
@@ -179,7 +179,7 @@ export class ReviewManager implements vscode.Disposable {
     const top = new vscode.Range(0, 0, 0, 0);
     const lenses = [
       new vscode.CodeLens(top, {
-        title: `Claude 修改了 ${review.hunks.length} 處（+${review.additions} −${review.deletions}）`,
+        title: `${review.hunks.length} 處修改（+${review.additions} −${review.deletions}）`,
         command: 'claudeInlineDiff.nextHunk', arguments: [], tooltip: '跳到下一處修改',
       }),
       new vscode.CodeLens(top, { title: '✓ 全部保留', command: 'claudeInlineDiff.acceptFile', arguments: [p] }),
@@ -277,7 +277,7 @@ export function deletedHover(h: ReviewHunk): vscode.MarkdownString {
     const pad = ' '.repeat(width - line.length + 1);
     return `<span style="color:var(--vscode-editor-foreground);background-color:var(--vscode-diffEditor-removedLineBackground);">${inner}${pad}</span>`;
   });
-  const title = h.type === 'delete' ? `Claude 刪除了 ${h.removed.length} 行` : '修改前';
+  const title = h.type === 'delete' ? `已刪除 ${h.removed.length} 行` : '修改前';
   const md = new vscode.MarkdownString(`${title}\n\n<pre>${rows.join('\n')}</pre>`);
   md.supportHtml = true;
   return md;

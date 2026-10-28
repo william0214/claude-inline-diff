@@ -30,7 +30,7 @@
       "activitybar": [
         {
           "id": "claudeInlineDiff",
-          "title": "Claude 修改審查",
+          "title": "AI 修改審查",
           "icon": "media/review.svg",
           "when": "!claudeInlineDiff.hasClaudeCode"
         }
@@ -173,7 +173,7 @@
         "claudeInlineDiff.autoOpen": {
           "type": "boolean",
           "default": false,
-          "description": "Claude 修改檔案後，自動在編輯器開啟該檔案並定位到修改處（預設關閉，可從「已變更檔案」清單開啟）"
+          "description": "AI 修改檔案後，自動在編輯器開啟該檔案並定位到修改處（預設關閉，可從「已變更檔案」清單開啟）"
         }
       }
     },
