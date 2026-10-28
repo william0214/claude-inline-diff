@@ -134,51 +134,35 @@ async function run() {
       await screenshot('2-deleted-hover.png');
       await exec('editor.action.hideHover').then(undefined, () => undefined);
     });
-    await step('diff 編輯器模式：左右並排與上下排、左側只含 Claude 的修改、保留／復原按鈕', async () => {
-      const cfg = () => vscode.workspace.getConfiguration('claudeInlineDiff');
-      await cfg().update('reviewMode', 'diff', vscode.ConfigurationTarget.Workspace);
+    const isReview = (t, f) => t && t.input instanceof vscode.TabInputTextDiff
+      && t.input.original.scheme === 'claude-inline-diff-base' && real(t.input.modified.fsPath) === real(f);
+    const setMode = m => vscode.workspace.getConfiguration('claudeInlineDiff').update('reviewMode', m, vscode.ConfigurationTarget.Workspace);
+    await step('統一成「AI 修改」畫面：一般方式開檔也自動切換、上下排、標題只有檔名', async () => {
+      await setMode('diff');
       try {
-        assert.strictEqual(vscode.workspace.getConfiguration('diffEditor').get('codeLens'), true, 'diff 編輯器顯示 CodeLens');
-        await exec('claudeInlineDiff.openChangedFile', app);
-        const tab = await waitFor(() => {
-          const t = vscode.window.tabGroups.activeTabGroup.activeTab;
-          return t && t.input instanceof vscode.TabInputTextDiff && t;
-        }, '開啟 diff 編輯器');
-        assert.strictEqual(tab.input.original.scheme, 'claude-inline-diff-base');
-        assert.strictEqual(real(tab.input.modified.fsPath), real(app), '右側是原始檔案');
+        // 模擬 0.5.0 切換按鈕留下的「左右並排」設定，應被清掉
+        await vscode.workspace.getConfiguration('diffEditor').update('renderSideBySide', true, vscode.ConfigurationTarget.Global);
+        for (const tab of vscode.window.tabGroups.all.flatMap(g => g.tabs)) await vscode.window.tabGroups.close(tab);
+        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(app));
+        await vscode.window.showTextDocument(doc, { preview: false });
+        const tab = await waitFor(() => { const t = vscode.window.tabGroups.activeTabGroup.activeTab; return isReview(t, app) && t; }, '自動切換成 AI 修改畫面');
+        assert.strictEqual(tab.label, 'appsettings.json', '標題只有檔名');
+        await waitFor(() => vscode.workspace.getConfiguration('diffEditor').get('renderSideBySide') === false, '上下排');
+        const plain = vscode.window.tabGroups.all.flatMap(g => g.tabs)
+          .filter(t => t.input instanceof vscode.TabInputText && real(t.input.uri.fsPath) === real(app));
+        assert.strictEqual(plain.length, 0, '不留一般分頁，只有一種畫面');
         const left = await vscode.workspace.openTextDocument(tab.input.original);
-        assert.strictEqual(left.getText(), fixture, '左側＝Claude 修改前');
+        assert.strictEqual(left.getText(), fixture, '紅色列＝AI 修改前的內容');
         const editor = vscode.window.activeTextEditor;
-        const s = await fileState(app);
-        assert.ok(editor && real(editor.document.uri.fsPath) === real(app));
-        assert.strictEqual(editor.selection.active.line, s.hunks[0].curStart, '定位到第一個修改');
+        assert.ok(editor && real(editor.document.uri.fsPath) === real(app), '右側就是原始檔案');
         const lenses = await vscode.commands.executeCommand('vscode.executeCodeLensProvider', editor.document.uri);
         assert.strictEqual(lenses.filter(l => l.command && l.command.title === '✓ 保留').length, 2);
-
-        const sideBySide = () => vscode.workspace.getConfiguration('diffEditor').get('renderSideBySide');
-        const limited = () => vscode.workspace.getConfiguration('diffEditor').get('useInlineViewWhenSpaceIsLimited');
-        // 從 VS Code 預設值開始（測試用的使用者設定會沿用上一輪）
-        const resetDiffLayout = async () => {
-          for (const k of ['renderSideBySide', 'useInlineViewWhenSpaceIsLimited']) {
-            await vscode.workspace.getConfiguration('diffEditor').update(k, undefined, vscode.ConfigurationTarget.Global);
-          }
-        };
-        await resetDiffLayout();
-        await exec('claudeInlineDiff.toggleLayout');
-        await waitFor(() => sideBySide() === true && limited() === false, '左右並排（空間不足也不自動改上下排）');
-        await screenshot('4-diff-side-by-side.png');
-        const eds = (await state()).editors;
-        const diffSide = eds.find(e => e.uri.startsWith('file:') && e.inDiff);
-        assert.ok(diffSide, '偵測到 diff 編輯器內的原始檔案：' + JSON.stringify(eds));
-        await exec('claudeInlineDiff.toggleLayout');
-        await waitFor(() => sideBySide() === false, '上下排');
-        await screenshot('5-diff-inline.png');
-        await exec('claudeInlineDiff.toggleLayout');
-        await waitFor(() => sideBySide() === true, '切回左右並排');
-        await resetDiffLayout();
+        await exec('claudeInlineDiff.openChangedFile', app);
+        assert.strictEqual(vscode.window.tabGroups.all.flatMap(g => g.tabs).filter(t => isReview(t, app)).length, 1, '從清單開也是同一個分頁');
+        await screenshot('4-ai-changes.png');
         await exec('workbench.action.closeActiveEditor');
       } finally {
-        await cfg().update('reviewMode', 'inline', vscode.ConfigurationTarget.Workspace);
+        await setMode('inline');
       }
     });
     await step('Test 4｜保留修改、復原刪除，JSON 結構正確', async () => {
@@ -434,6 +418,28 @@ async function run() {
       assert.strictEqual(fs.readFileSync(dup, 'utf8'), before);
     });
 
+    await step('AI 修改畫面：審查完自動回到一般分頁', async () => {
+      await setMode('diff');
+      try {
+        const f = file('back.txt');
+        fs.writeFileSync(f, 'one\ntwo\n');
+        await aiEdit(f, 'one\nTWO\nthree\n');
+        await waitFile(f, s => s && s.hunks.length === 1, 'hunk');
+        await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(f)), { preview: false });
+        await waitFor(() => isReview(vscode.window.tabGroups.activeTabGroup.activeTab, f), '切換成 AI 修改畫面');
+        const s = await fileState(f);
+        await exec('claudeInlineDiff.acceptHunk', f, s.hunks[0].id);
+        await waitCleared(f);
+        await waitFor(() => {
+          const t = vscode.window.tabGroups.activeTabGroup.activeTab;
+          return t && t.input instanceof vscode.TabInputText && real(t.input.uri.fsPath) === real(f);
+        }, '回到一般分頁');
+        assert.strictEqual(vscode.window.tabGroups.all.flatMap(g => g.tabs).filter(t => isReview(t, f)).length, 0);
+        assert.strictEqual(fs.readFileSync(f, 'utf8'), 'one\nTWO\nthree\n');
+      } finally {
+        await setMode('inline');
+      }
+    });
     await step('結束時沒有殘留的審查項目', async () => {
       const st = await state();
       assert.strictEqual(st.reviews.length, 0, JSON.stringify(st.reviews.map(r => r.path)));

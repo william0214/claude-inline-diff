@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { stripBom, splitLines, eolOf } from './diff';
 import {
-  SessionStore, FileSession, ReviewHunk, acceptInSession, rejectInSession, isSettled, currentText, openDocument,
+  SessionStore, FileSession, ReviewHunk, acceptInSession, rejectInSession, isSettled, currentText, openDocument, fileKey,
 } from './session';
 import { ReviewManager, inDiffEditor } from './review';
 import { ChangedFilesView, CHANGED_FILES_VIEWS } from './changedFiles';
@@ -262,13 +262,20 @@ function reviewBaseText(p: string): string {
   return lines.join(eolOf(cur));
 }
 
-// 以 VS Code 內建 diff 編輯器審查：左邊修改前、右邊原始檔案（可直接編輯）；
-// 左右並排 / 上下排（刪除的行是真正的紅色列，類似 Copilot）可用標題列按鈕切換
-async function openDiff(filePath?: string) {
+// 「AI 修改」畫面：以 VS Code 內建 diff 編輯器的上下排呈現，AI 刪掉的行是真正的紅色列、AI 新增的行是綠色列，
+// 右側就是原始檔案本身（可直接編輯、存檔、IntelliSense），分頁標題只顯示檔名
+async function openDiff(filePath?: string, viewColumn?: vscode.ViewColumn) {
   const p = filePath ?? activePath();
   if (!p || !store.get(p)) return;
+  await ensureTopBottomLayout();
+  // 已經開著就切過去，不重複開分頁
+  const existing = vscode.window.tabGroups.all.flatMap(g => g.tabs.map(t => ({ g, t })))
+    .find(({ t }) => isReviewDiff(t) && fileKey((t.input as vscode.TabInputTextDiff).modified.fsPath) === fileKey(p));
   await vscode.commands.executeCommand('vscode.diff', baseUri(p), vscode.Uri.file(p),
-    path.basename(p), { preview: false });
+    path.basename(p), { preview: false, viewColumn: viewColumn ?? existing?.g.viewColumn });
+  const dupes = vscode.window.tabGroups.all.flatMap(g => g.tabs)
+    .filter(t => !t.isActive && isReviewDiff(t) && fileKey((t.input as vscode.TabInputTextDiff).modified.fsPath) === fileKey(p));
+  if (dupes.length) await vscode.window.tabGroups.close(dupes, true);
   const editor = vscode.window.activeTextEditor;
   const first = reviews.review(p)?.hunks.find(h => h.status === 'pending') ?? reviews.review(p)?.hunks[0];
   if (editor?.document.uri.scheme === 'file' && first) reveal(editor, first);
@@ -280,6 +287,58 @@ async function toggleLayout() {
   const toSideBySide = !cfg.get('renderSideBySide', true) || cfg.get('useInlineViewWhenSpaceIsLimited', true);
   if (toSideBySide) await cfg.update('useInlineViewWhenSpaceIsLimited', false, vscode.ConfigurationTarget.Global);
   await cfg.update('renderSideBySide', toSideBySide, vscode.ConfigurationTarget.Global);
+}
+
+// 一律上下排：本擴充套件以 configurationDefaults 把 diffEditor.renderSideBySide 預設為 false；
+// 若之前（0.5.0 的切換按鈕）明確設成左右並排，清掉那個值讓預設生效
+async function ensureTopBottomLayout() {
+  const cfg = vscode.workspace.getConfiguration('diffEditor');
+  const info = cfg.inspect<boolean>('renderSideBySide');
+  if (info?.workspaceValue === true) await cfg.update('renderSideBySide', undefined, vscode.ConfigurationTarget.Workspace);
+  if (info?.globalValue === true) await cfg.update('renderSideBySide', undefined, vscode.ConfigurationTarget.Global);
+}
+
+// 只要檔案有待審查的 AI 修改，不管從哪裡打開，一般分頁一律換成「AI 修改」畫面；審查完（全部保留 / 復原）再換回一般分頁
+let syncing = false;
+let syncTimer: NodeJS.Timeout | undefined;
+function scheduleSyncTabs() {
+  if (syncTimer) clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => void syncTabs(), 60);
+}
+
+function hasPending(p: string): boolean {
+  const r = reviews.review(p);
+  return !!r && !r.missing && r.hunks.length > 0;
+}
+
+async function syncTabs() {
+  if (syncing || reviewMode() !== 'diff') return;
+  syncing = true;
+  try {
+    for (const group of vscode.window.tabGroups.all) {
+      for (const tab of group.tabs) {
+        if (!isReviewDiff(tab)) continue;
+        const p = (tab.input as vscode.TabInputTextDiff).modified.fsPath;
+        if (hasPending(p)) continue;
+        const wasActive = tab.isActive && group.isActive;
+        await vscode.window.tabGroups.close(tab, true);
+        if (wasActive && fs.existsSync(p)) {
+          await vscode.window.showTextDocument(vscode.Uri.file(p), { viewColumn: group.viewColumn, preview: false });
+        }
+      }
+    }
+    const group = vscode.window.tabGroups.activeTabGroup;
+    const tab = group.activeTab;
+    // 有未儲存內容的一般分頁不動，避免關閉時跳出存檔提示
+    if (tab?.input instanceof vscode.TabInputText && tab.input.uri.scheme === 'file' && !tab.isDirty && hasPending(tab.input.uri.fsPath)) {
+      const p = tab.input.uri.fsPath;
+      await openDiff(p, group.viewColumn);
+      const plain = group.tabs.find(t => t.input instanceof vscode.TabInputText && fileKey(t.input.uri.fsPath) === fileKey(p));
+      if (plain && !plain.isDirty) await vscode.window.tabGroups.close(plain, true);
+    }
+  } finally {
+    syncing = false;
+  }
 }
 
 function isReviewDiff(tab: vscode.Tab | undefined): boolean {
@@ -381,8 +440,8 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     store, reviews, view, status,
     baseChanged,
-    reviews.onDidChange(() => { updateStatus(); autoOpen(); refreshBaseDocs(); }),
-    vscode.window.tabGroups.onDidChangeTabs(updateDiffContext),
+    reviews.onDidChange(() => { updateStatus(); autoOpen(); refreshBaseDocs(); scheduleSyncTabs(); }),
+    vscode.window.tabGroups.onDidChangeTabs(() => { updateDiffContext(); scheduleSyncTabs(); }),
     vscode.window.tabGroups.onDidChangeTabGroups(updateDiffContext),
     ...CHANGED_FILES_VIEWS.map(id => vscode.window.registerWebviewViewProvider(id, view)),
     vscode.workspace.registerTextDocumentContentProvider(BASELINE_SCHEME, {
@@ -413,6 +472,7 @@ export function activate(context: vscode.ExtensionContext) {
   reviews.refresh();
   updateStatus();
   updateDiffContext();
+  scheduleSyncTabs();
 }
 
 export function deactivate() {}
