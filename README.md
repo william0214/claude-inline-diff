@@ -26,7 +26,7 @@ Review the edits Claude Code makes, GitHub Copilot style: open a changed file an
 2. 開啟專案資料夾，`Ctrl+Shift+P`（Mac：`Cmd+Shift+P`）→ **Inline Diff: 安裝 Claude Code hook 到此工作區**
 3. 開一個新的 Claude Code 對話，讓它修改檔案
 
-每個專案做一次第 2 步；hook 寫在該專案的 `.claude/settings.local.json`，不會被 commit。**更新擴充套件版本後要重新執行一次第 2 步。**
+每個專案做一次第 2 步；hook 寫在該專案的 `.claude/settings.local.json`，不會被 commit。hook 腳本放在固定位置 `~/.inline-diff-review/`，擴充套件更新後不需要重新安裝；啟動時也會自動修正工作區中指向舊版本的 hook。
 
 ## 快捷鍵
 

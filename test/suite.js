@@ -148,9 +148,10 @@ async function run() {
         const tab = await waitFor(() => { const t = vscode.window.tabGroups.activeTabGroup.activeTab; return isReview(t, app) && t; }, '自動切換成 AI 修改畫面');
         assert.strictEqual(tab.label, 'appsettings.json', '標題只有檔名');
         await waitFor(() => vscode.workspace.getConfiguration('diffEditor').get('renderSideBySide') === false, '上下排');
-        const plain = vscode.window.tabGroups.all.flatMap(g => g.tabs)
-          .filter(t => t.input instanceof vscode.TabInputText && real(t.input.uri.fsPath) === real(app));
-        assert.strictEqual(plain.length, 0, '不留一般分頁，只有一種畫面');
+        // 換成 AI 修改畫面後，原本的一般分頁會在下一刻關閉
+        await waitFor(() => vscode.window.tabGroups.all.flatMap(g => g.tabs)
+          .filter(t => t.input instanceof vscode.TabInputText && real(t.input.uri.fsPath) === real(app)).length === 0,
+        '不留一般分頁，只有一種畫面');
         const left = await vscode.workspace.openTextDocument(tab.input.original);
         assert.strictEqual(left.getText(), fixture, '紅色列＝AI 修改前的內容');
         const editor = vscode.window.activeTextEditor;
@@ -439,6 +440,57 @@ async function run() {
       } finally {
         await setMode('inline');
       }
+    });
+    // ---- 「用久了失靈」：hook 路徑含版本號、Claude Code 在子資料夾執行 ----
+    const home = process.env.INLINE_DIFF_REVIEW_HOME;
+    const stableHook = path.join(home, 'hooks', 'inline-diff-snapshot.js');
+    await step('hook 部署在固定位置（不含版本號），可獨立執行', async () => {
+      await waitFor(() => fs.existsSync(stableHook) && fs.existsSync(path.join(home, 'out', 'diff.js')), 'hook 已部署');
+      const ext = vscode.extensions.getExtension('william0214.inline-diff-review');
+      assert.ok(!stableHook.includes(ext.packageJSON.version), '路徑不含版本號');
+    });
+    await step('自動修正指向舊版本 / 別人電腦的 hook，不動其他 hook', async () => {
+      const sub = file('oldproj');
+      const settingsPath = path.join(sub, '.claude', 'settings.local.json');
+      fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+      const other = { type: 'command', command: 'echo keep-me' };
+      fs.writeFileSync(settingsPath, JSON.stringify({
+        permissions: { allow: ['Bash(npm test)'] },
+        hooks: {
+          PreToolUse: [
+            { matcher: 'Edit|Write|MultiEdit', hooks: [{ type: 'command', command: 'node "c:/Users/jia-huei.syu/.vscode/extensions/local.claude-inline-diff-0.1.0/hooks/inline-diff-snapshot.js"' }] },
+            { matcher: 'Bash', hooks: [other] },
+          ],
+        },
+      }, null, 2));
+      const fixed = await exec('claudeInlineDiff.repairHooks');
+      assert.ok(fixed.some(p => real(p) === real(settingsPath)), JSON.stringify(fixed));
+      const s = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      const cmd = 'node "' + stableHook.split(path.sep).join('/') + '"';
+      for (const ev of ['PreToolUse', 'PostToolUse']) {
+        const ours = s.hooks[ev].flatMap(m => m.hooks).filter(h => h.command.includes('inline-diff-snapshot.js'));
+        assert.deepStrictEqual(ours.map(h => h.command), [cmd], ev);
+      }
+      assert.ok(s.hooks.PreToolUse.some(m => m.matcher === 'Bash' && m.hooks[0].command === 'echo keep-me'), '其他 hook 保留');
+      assert.deepStrictEqual(s.permissions, { allow: ['Bash(npm test)'] }, '其他設定保留');
+      assert.deepStrictEqual(await exec('claudeInlineDiff.repairHooks'), [], '再跑一次不會重複修改');
+    });
+    await step('Claude Code 在子資料夾執行：用固定位置的 hook 修改兩次（中間有手動修改）也偵測得到', async () => {
+      const sub = file('oldproj');
+      const f = path.join(sub, 'page.txt');
+      fs.writeFileSync(f, 'a\nb\nc\nd\n');
+      const run = event => cp.execFileSync(process.execPath, [stableHook], {
+        input: JSON.stringify({ cwd: sub, hook_event_name: event, session_id: 'sub', tool_name: 'Edit', tool_input: { file_path: f } }),
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', CLAUDE_PROJECT_DIR: sub },
+      });
+      run('PreToolUse'); fs.writeFileSync(f, 'a\nB\nc\nd\n'); run('PostToolUse');
+      fs.writeFileSync(f, 'a\nB\nc\nd\nuser line\n');
+      run('PreToolUse'); fs.writeFileSync(f, 'a\nB\nc\nD\nuser line\n'); run('PostToolUse');
+      assert.ok(fs.readdirSync(path.join(sub, '.claude', 'inline-diff')).some(n => n.endsWith('.json')), '紀錄寫在子資料夾');
+      const s = await waitFile(f, s => s && s.hunks.length === 2, '偵測到子資料夾的修改');
+      assert.ok(s.hunks.every(h => !h.added.includes('user line')), '手動修改沒被算進去（固定位置的 hook 能載入 diff.js）');
+      await exec('claudeInlineDiff.acceptFile', f);
+      await waitCleared(f);
     });
     await step('結束時沒有殘留的審查項目', async () => {
       const st = await state();

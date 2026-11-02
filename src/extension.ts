@@ -6,9 +6,9 @@ import {
   SessionStore, FileSession, ReviewHunk, acceptInSession, rejectInSession, isSettled, currentText, openDocument, fileKey,
 } from './session';
 import { ReviewManager, inDiffEditor } from './review';
+import { deployHook, patchSettings } from './hookInstall';
 import { ChangedFilesView, CHANGED_FILES_VIEWS } from './changedFiles';
 
-const HOOK_SCRIPT = 'inline-diff-snapshot.js';
 const BASELINE_SCHEME = 'claude-inline-diff-base';
 
 let store: SessionStore;
@@ -375,30 +375,30 @@ async function installHook(context: vscode.ExtensionContext) {
     return;
   }
   const settingsPath = path.join(folder.uri.fsPath, '.claude', 'settings.local.json');
-  let settings: any = {};
-  if (fs.existsSync(settingsPath)) {
-    try {
-      settings = JSON.parse(stripBom(fs.readFileSync(settingsPath, 'utf8')));
-    } catch {
-      vscode.window.showErrorMessage(`${settingsPath} 不是合法的 JSON，請先修正。`);
-      return;
-    }
+  const result = patchSettings(settingsPath, deployHook(context.extensionPath), true);
+  if (result === 'invalid') {
+    vscode.window.showErrorMessage(`${settingsPath} 不是合法的 JSON，請先修正。`);
+    return;
   }
-  const script = path.join(context.extensionPath, 'hooks', HOOK_SCRIPT).replace(/\\/g, '/');
-  settings.hooks ??= {};
-  for (const event of ['PreToolUse', 'PostToolUse']) {
-    // 移除舊版本留下的設定（擴充套件路徑會隨版本變動）
-    settings.hooks[event] = (settings.hooks[event] ?? [])
-      .map((m: any) => ({ ...m, hooks: (m.hooks ?? []).filter((h: any) => !String(h.command ?? '').includes(HOOK_SCRIPT)) }))
-      .filter((m: any) => m.hooks.length > 0);
-    settings.hooks[event].push({
-      matcher: 'Edit|Write|MultiEdit',
-      hooks: [{ type: 'command', command: `node "${script}"` }],
-    });
-  }
-  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
   vscode.window.showInformationMessage('已安裝 hook。請重新開始 Claude Code 對話以套用設定。');
+}
+
+// 啟動時修正工作區（含子資料夾）中指向舊位置的 hook，例如舊版本的擴充套件資料夾或別人電腦的路徑
+async function repairHooks(context: vscode.ExtensionContext, opts: { quiet?: boolean } = {}): Promise<string[]> {
+  let script: string;
+  try {
+    script = deployHook(context.extensionPath);
+  } catch (e) {
+    vscode.window.showErrorMessage(`無法部署 hook：${e}`);
+    return [];
+  }
+  const files = await vscode.workspace.findFiles('**/.claude/settings.local.json', '**/node_modules/**', 200);
+  const fixed = files.map(u => u.fsPath).filter(p => patchSettings(p, script, false) === 'updated');
+  if (fixed.length && !opts.quiet) {
+    vscode.window.showInformationMessage(
+      `已修正 ${fixed.length} 個專案的 Claude Code hook（原本指向已不存在的舊版本）。請重新開始 Claude Code 對話。`);
+  }
+  return fixed;
 }
 
 // ---------- 自動開啟 ----------
@@ -449,6 +449,8 @@ export function activate(context: vscode.ExtensionContext) {
       provideTextDocumentContent: uri => reviewBaseText(uri.query),
     }),
     vscode.commands.registerCommand('claudeInlineDiff.installHook', () => installHook(context)),
+    vscode.commands.registerCommand('claudeInlineDiff.repairHooks', () => repairHooks(context)),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => void repairHooks(context)),
     vscode.commands.registerCommand('claudeInlineDiff.acceptHunk', acceptHunk),
     vscode.commands.registerCommand('claudeInlineDiff.rejectHunk', rejectHunk),
     vscode.commands.registerCommand('claudeInlineDiff.showDeleted', showDeleted),
@@ -473,6 +475,7 @@ export function activate(context: vscode.ExtensionContext) {
   updateStatus();
   updateDiffContext();
   scheduleSyncTabs();
+  void repairHooks(context);
 }
 
 export function deactivate() {}

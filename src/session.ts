@@ -160,7 +160,11 @@ export class SessionStore implements vscode.Disposable {
       if (fs.existsSync(dir)) {
         for (const f of fs.readdirSync(dir)) if (f.endsWith('.json')) this.load(path.join(dir, f));
       }
-      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, '.claude/inline-diff/*.json'));
+      // Claude Code 若在子資料夾啟動，hook 會把紀錄寫在該子資料夾的 .claude/inline-diff，也要一併讀取與監看
+      const pattern = new vscode.RelativePattern(folder, '**/.claude/inline-diff/*.json');
+      void vscode.workspace.findFiles(pattern, '**/node_modules/**', 500)
+        .then(uris => { for (const u of uris) this.load(u.fsPath); }, () => undefined);
+      const watcher = vscode.workspace.createFileSystemWatcher(pattern);
       watcher.onDidCreate(u => this.load(u.fsPath));
       watcher.onDidChange(u => this.load(u.fsPath));
       watcher.onDidDelete(u => this.drop(u.fsPath));

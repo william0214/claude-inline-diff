@@ -2,7 +2,7 @@
   "name": "inline-diff-review",
   "displayName": "Inline Diff Review for Claude Code",
   "description": "以 diff 編輯器（左右並排／上下排）或行內紅綠標示審查 Claude Code 的修改，逐段保留 / 復原，並在聊天視窗下方列出已變更檔案（類似 GitHub Copilot）",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "publisher": "william0214",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -73,6 +73,10 @@
       {
         "command": "claudeInlineDiff.installHook",
         "title": "Inline Diff: 安裝 Claude Code hook 到此工作區"
+      },
+      {
+        "command": "claudeInlineDiff.repairHooks",
+        "title": "Inline Diff: 修正工作區中失效的 Claude Code hook"
       },
       {
         "command": "claudeInlineDiff.acceptFile",

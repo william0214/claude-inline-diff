@@ -85,6 +85,8 @@ async function main() {
         '--skip-welcome', '--skip-release-notes', '--disable-workspace-trust'],
       extensionTestsEnv: {
         INLINE_DIFF_E2E_WS: ws, INLINE_DIFF_E2E_OUT: out, INLINE_DIFF_HOOK: hook,
+        // hook 固定位置改到暫存資料夾，測試不碰使用者家目錄
+        INLINE_DIFF_REVIEW_HOME: path.join(os.tmpdir(), 'inline-diff-e2e-home'),
         INLINE_DIFF_WITH_CLAUDE: claude && !process.env.INLINE_DIFF_NO_CLAUDE ? '1' : '',
       },
     });
